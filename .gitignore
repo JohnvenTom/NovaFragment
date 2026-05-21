@@ -12,6 +12,7 @@ build/
 
 # IDE / 编辑器
 .vscode/
+.claude/
 .idea/
 .trae/
 *.swp
