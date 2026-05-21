@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D彩色粒子图像效果</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=Playfair+Display:wght@400;600;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="canvas-container"></div>
+
+    <!-- 左侧参数控制面板 -->
+    <aside class="control-panel" id="control-panel">
+        <div class="control-panel-inner">
+            <header class="ctrl-header">
+                <h2 class="ctrl-title">⚙ CONTROLS</h2>
+                <button type="button" class="ctrl-toggle" id="ctrl-toggle" title="收起面板">▶</button>
+            </header>
+
+            <div class="ctrl-body" id="ctrl-body">
+                <!-- Bloom 泛光 -->
+                <section class="ctrl-section">
+                    <h3 class="section-title">✦ BLOOM GLOW</h3>
+                    <div class="ctrl-row">
+                        <label for="bloom-strength" class="ctrl-label">Strength</label>
+                        <input type="range" id="bloom-strength" min="0" max="5" step="0.1" value="1.8" class="ctrl-slider">
+                        <span class="ctrl-value" id="bloom-strength-val">1.8</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="bloom-radius" class="ctrl-label">Radius</label>
+                        <input type="range" id="bloom-radius" min="0" max="1" step="0.05" value="0.4" class="ctrl-slider">
+                        <span class="ctrl-value" id="bloom-radius-val">0.4</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="bloom-threshold" class="ctrl-label">Threshold</label>
+                        <input type="range" id="bloom-threshold" min="0" max="1" step="0.05" value="0.5" class="ctrl-slider">
+                        <span class="ctrl-value" id="bloom-threshold-val">0.5</span>
+                    </div>
+                </section>
+
+                <!-- 粒子基础 -->
+                <section class="ctrl-section">
+                    <h3 class="section-title">✦ PARTICLE BASE</h3>
+                    <div class="ctrl-row">
+                        <label for="particle-size" class="ctrl-label">Size Base</label>
+                        <input type="range" id="particle-size" min="0.02" max="0.2" step="0.005" value="0.085" class="ctrl-slider">
+                        <span class="ctrl-value" id="particle-size-val">0.085</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="particle-spread" class="ctrl-label">Spread Factor</label>
+                        <input type="range" id="particle-spread" min="5" max="50" step="1" value="20" class="ctrl-slider">
+                        <span class="ctrl-value" id="particle-spread-val">20</span>
+                    </div>
+                </section>
+
+                <!-- 发光效果 -->
+                <section class="ctrl-section">
+                    <h3 class="section-title">✦ GLOW EFFECT</h3>
+                    <div class="ctrl-row">
+                        <label for="glow-decay" class="ctrl-label">Glow Decay</label>
+                        <input type="range" id="glow-decay" min="2" max="12" step="0.2" value="5.0" class="ctrl-slider">
+                        <span class="ctrl-value" id="glow-decay-val">5.0</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="color-glow-mult" class="ctrl-label">Color Glow</label>
+                        <input type="range" id="color-glow-mult" min="0.5" max="5" step="0.1" value="1.8" class="ctrl-slider">
+                        <span class="ctrl-value" id="color-glow-mult-val">1.8</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="core-brightness" class="ctrl-label">Core Bright</label>
+                        <input type="range" id="core-brightness" min="0" max="3" step="0.1" value="0.8" class="ctrl-slider">
+                        <span class="ctrl-value" id="core-brightness-val">0.8</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="flow-glow-amp" class="ctrl-label">Flow Glow Amp</label>
+                        <input type="range" id="flow-glow-amp" min="0" max="0.5" step="0.01" value="0.06" class="ctrl-slider">
+                        <span class="ctrl-value" id="flow-glow-amp-val">0.06</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="fg-glow-coef" class="ctrl-label">Frgnd Glow</label>
+                        <input type="range" id="fg-glow-coef" min="0" max="0.2" step="0.005" value="0.05" class="ctrl-slider">
+                        <span class="ctrl-value" id="fg-glow-coef-val">0.05</span>
+                    </div>
+                </section>
+
+                <!-- 动态脉动 -->
+                <section class="ctrl-section">
+                    <h3 class="section-title">✦ ANIMATION</h3>
+                    <div class="ctrl-row">
+                        <label for="pulse-amp" class="ctrl-label">Pulse Amp</label>
+                        <input type="range" id="pulse-amp" min="0" max="0.15" step="0.005" value="0.015" class="ctrl-slider">
+                        <span class="ctrl-value" id="pulse-amp-val">0.015</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="depth-factor" class="ctrl-label">Depth Factor</label>
+                        <input type="range" id="depth-factor" min="0" max="0.4" step="0.01" value="0.15" class="ctrl-slider">
+                        <span class="ctrl-value" id="depth-factor-val">0.15</span>
+                    </div>
+                </section>
+
+                <!-- 场景光照 -->
+                <section class="ctrl-section">
+                    <h3 class="section-title">✦ LIGHTING</h3>
+                    <div class="ctrl-row">
+                        <label for="ambient-intensity" class="ctrl-label">Ambient</label>
+                        <input type="range" id="ambient-intensity" min="0" max="2" step="0.05" value="0.7" class="ctrl-slider">
+                        <span class="ctrl-value" id="ambient-intensity-val">0.7</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="point1-intensity" class="ctrl-label">Point Light 1</label>
+                        <input type="range" id="point1-intensity" min="0" max="5" step="0.1" value="2.2" class="ctrl-slider">
+                        <span class="ctrl-value" id="point1-intensity-val">2.2</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="point2-intensity" class="ctrl-label">Point Light 2</label>
+                        <input type="range" id="point2-intensity" min="0" max="3" step="0.1" value="1.5" class="ctrl-slider">
+                        <span class="ctrl-value" id="point2-intensity-val">1.5</span>
+                    </div>
+                </section>
+
+                <!-- 雾效 & 相机 -->
+                <section class="ctrl-section">
+                    <h3 class="section-title">✦ SCENE</h3>
+                    <div class="ctrl-row">
+                        <label for="fog-density" class="ctrl-label">Fog Density</label>
+                        <input type="range" id="fog-density" min="0" max="0.1" step="0.002" value="0.028" class="ctrl-slider">
+                        <span class="ctrl-value" id="fog-density-val">0.028</span>
+                    </div>
+                    <div class="ctrl-row">
+                        <label for="camera-z" class="ctrl-label">Camera Z</label>
+                        <input type="range" id="camera-z" min="4" max="30" step="0.5" value="22" class="ctrl-slider">
+                        <span class="ctrl-value" id="camera-z-val">22</span>
+                    </div>
+                </section>
+
+                <!-- 操作按钮 -->
+                <div class="ctrl-actions">
+                    <button type="button" class="ctrl-btn reset-btn" id="ctrl-reset">↺ RESET ALL</button>
+                    <button type="button" class="ctrl-btn export-btn" id="ctrl-export">↓ EXPORT CFG</button>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 收起时露出的展开标签（独立于面板外，避免被 transform 影响） -->
+    <div class="ctrl-expand-tab" id="ctrl-expand-tab"><span>⚙ CONTROLS</span></div>
+
+    <!-- 抽屉触发按钮 -->
+    <button type="button" class="drawer-trigger" id="drawer-trigger" title="打开上传面板">
+        <span class="trigger-icon">🎬</span>
+        <span class="trigger-label">UPLOAD</span>
+    </button>
+
+    <!-- 右侧金色海报风格抽屉 -->
+    <aside class="poster-drawer" id="poster-drawer">
+        <!-- 抽屉遮罩层 -->
+        <div class="drawer-overlay" id="drawer-overlay"></div>
+        
+        <!-- 抽屉主体 -->
+        <div class="drawer-panel">
+            <!-- Art Deco装饰边框 -->
+            <div class="deco-border"></div>
+            
+            <!-- 顶部标题区 -->
+            <header class="drawer-header">
+                <div class="corner-ornament top-left"></div>
+                <div class="corner-ornament top-right"></div>
+
+                <h1 class="poster-title">
+                    <span class="title-line">PARTICLE</span>
+                    <span class="title-line accent">MAGIC</span>
+                </h1>
+
+                <p class="poster-subtitle">✦ Transform Your Image Into 3D Art ✦</p>
+            </header>
+
+            <!-- 上传区域 -->
+            <main class="drawer-content">
+                <div class="upload-zone" id="upload-zone">
+                    <label for="image-input" class="upload-area">
+                        <div class="upload-frame">
+                            <div class="frame-corner tl"></div>
+                            <div class="frame-corner tr"></div>
+                            <div class="frame-corner bl"></div>
+                            <div class="frame-corner br"></div>
+                            
+                            <div class="upload-icon-wrapper">
+                                <span class="upload-icon">🖼️</span>
+                                <div class="icon-glow"></div>
+                            </div>
+                            
+                            <div class="upload-text-group">
+                                <span class="upload-main-text">DROP IMAGE HERE</span>
+                                <span class="upload-sub-text">or click to browse</span>
+                                <span class="upload-formats">JPG / PNG supported</span>
+                            </div>
+                        </div>
+                    </label>
+                    <input type="file" id="image-input" accept=".jpg,.jpeg,.png" hidden>
+                </div>
+
+                <!-- 装饰分隔线 -->
+                <div class="ornamental-divider">
+                    <span class="divider-diamond">◆</span>
+                </div>
+
+                <!-- 状态提示 -->
+                <div class="status-section" id="status-section">
+                    <div class="status-item">
+                        <span class="status-label">STATUS</span>
+                        <span class="status-value" id="status-value">AWAITING IMAGE...</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">SCROLL TO CONTROL</span>
+                        <span class="status-hint">↑ Disperse &nbsp;|&nbsp; ↓ Gather</span>
+                    </div>
+                </div>
+            </main>
+
+            <!-- 底部装饰 -->
+            <footer class="drawer-footer">
+                <div class="corner-ornament bottom-left"></div>
+                <div class="corner-ornament bottom-right"></div>
+                
+                <div class="footer-ornament">
+                    <span class="ornament-line"></span>
+                    <span class="ornament-star">★</span>
+                    <span class="ornament-line"></span>
+                </div>
+                
+                <p class="footer-text">Three.js Particle System v2.0</p>
+            </footer>
+        </div>
+    </aside>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    
+    <script type="module" src="main.js"></script>
+</body>
+</html>

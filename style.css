@@ -1,0 +1,982 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    overflow: hidden;
+    background: #000000;
+    color: #ffffff;
+    font-family: 'Playfair Display', Georgia, serif;
+}
+
+#canvas-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 1;
+}
+
+#canvas-container canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* ========================================
+   抽屉触发按钮（右侧浮动）
+   ======================================== */
+.drawer-trigger {
+    position: fixed;
+    right: 24px;
+    top: 50%;
+    transform: translateY(-50%) rotate(-90deg);
+    transform-origin: right center;
+    z-index: 150;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 28px;
+    background: linear-gradient(
+        135deg,
+        #2a1810 0%,
+        #1a0a00 50%,
+        #0d0500 100%
+    );
+    border: 3px solid;
+    border-image: linear-gradient(
+        90deg,
+        #B8860B,
+        #FFD700 30%,
+        #DAA520 70%,
+        #8B6914
+    ) 1;
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    box-shadow:
+        inset 0 2px 4px rgba(255, 215, 0, 0.25),
+        inset 0 -2px 4px rgba(0, 0, 0, 0.9),
+        0 4px 0 #5C4A0F,
+        0 6px 16px rgba(0, 0, 0, 0.95),
+        0 0 20px rgba(218, 165, 32, 0.3);
+}
+
+.drawer-trigger:hover {
+    transform: translateY(-50%) rotate(-90deg) translateX(6px);
+    box-shadow:
+        inset 0 2px 6px rgba(255, 215, 0, 0.35),
+        inset 0 -2px 4px rgba(0, 0, 0, 0.85),
+        0 6px 0 #5C4A0F,
+        0 10px 24px rgba(0, 0, 0, 0.95),
+        0 0 35px rgba(218, 165, 32, 0.5);
+}
+
+.trigger-icon {
+    font-size: 20px;
+    filter: drop-shadow(0 0 8px rgba(255, 215, 0, 0.6));
+}
+
+.trigger-label {
+    font-family: 'Cinzel Decorative', serif;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    background: linear-gradient(
+        180deg,
+        #FFEC8B 0%,
+        #FFD700 40%,
+        #DAA520 70%,
+        #B8860B 100%
+    );
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 1));
+}
+
+.drawer-trigger.hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-50%) rotate(-90deg) translateX(80px);
+}
+
+/* ========================================
+   抽屉主体容器
+   ======================================== */
+.poster-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 200;
+    pointer-events: none;
+}
+
+.poster-drawer.open {
+    pointer-events: auto;
+}
+
+/* 遮罩层 */
+.drawer-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0);
+    transition: background 0.4s ease;
+}
+
+.poster-drawer.open .drawer-overlay {
+    background: rgba(0, 0, 0, 0.65);
+}
+
+/* 抽屉面板 */
+.drawer-panel {
+    position: absolute;
+    top: 0;
+    right: -420px;
+    width: 400px;
+    height: 100vh;
+    background:
+        radial-gradient(ellipse at 50% 0%, rgba(60, 20, 15, 0.95) 0%, rgba(20, 8, 5, 0.98) 100%);
+    border-left: 2px solid;
+    border-image: linear-gradient(
+        180deg,
+        #FFD700 0%,
+        #DAA520 15%,
+        #B8860B 50%,
+        #DAA520 85%,
+        #FFD700 100%
+    ) 1;
+    transition: right 0.5s cubic-bezier(0.23, 1, 0.32, 1);
+    box-shadow:
+        inset 30px 0 60px rgba(139, 69, 19, 0.08),
+        inset -10px 0 30px rgba(0, 0, 0, 0.6),
+        -20px 0 60px rgba(0, 0, 0, 0.8);
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.poster-drawer.open .drawer-panel {
+    right: 0;
+}
+
+/* Art Deco装饰边框 */
+.deco-border {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border: 2px solid rgba(255, 215, 0, 0.15);
+    pointer-events: none;
+}
+
+.deco-border::before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    border: 1px solid rgba(255, 215, 0, 0.08);
+}
+
+/* ========================================
+   角落装饰花纹
+   ======================================== */
+.corner-ornament {
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    pointer-events: none;
+}
+
+.corner-ornament::before,
+.corner-ornament::after {
+    content: '';
+    position: absolute;
+    background: linear-gradient(135deg, #FFD700, #DAA520);
+}
+
+.corner-ornament.top-left { top: 0; left: 0; }
+.corner-ornament.top-right { top: 0; right: 0; }
+.corner-ornament.bottom-left { bottom: 0; left: 0; }
+.corner-ornament.bottom-right { bottom: 0; right: 0; }
+
+.corner-ornament.top-left::before {
+    top: 0; left: 0;
+    width: 100%; height: 3px;
+}
+.corner-ornament.top-left::after {
+    top: 0; left: 0;
+    width: 3px; height: 100%;
+}
+
+.corner-ornament.top-right::before {
+    top: 0; right: 0;
+    width: 100%; height: 3px;
+}
+.corner-ornament.top-right::after {
+    top: 0; right: 0;
+    width: 3px; height: 100%;
+}
+
+.corner-ornament.bottom-left::before {
+    bottom: 0; left: 0;
+    width: 100%; height: 3px;
+}
+.corner-ornament.bottom-left::after {
+    bottom: 0; left: 0;
+    width: 3px; height: 100%;
+}
+
+.corner-ornament.bottom-right::before {
+    bottom: 0; right: 0;
+    width: 100%; height: 3px;
+}
+.corner-ornament.bottom-right::after {
+    bottom: 0; right: 0;
+    width: 3px; height: 100%;
+}
+
+/* ========================================
+   头部区域
+   ======================================== */
+.drawer-header {
+    position: relative;
+    padding: 48px 36px 32px;
+    text-align: center;
+    border-bottom: 2px solid rgba(255, 215, 0, 0.2);
+}
+
+.poster-title {
+    margin-bottom: 12px;
+    line-height: 1.1;
+}
+
+.title-line {
+    display: block;
+    font-family: 'Cinzel Decorative', serif;
+    font-size: 38px;
+    font-weight: 900;
+    letter-spacing: 6px;
+    background: linear-gradient(
+        180deg,
+        #FFF8DC 0%,
+        #FFD700 25%,
+        #DAA520 55%,
+        #B8860B 80%,
+        #8B6914 100%
+    );
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 1))
+            drop-shadow(0 0 20px rgba(255, 215, 0, 0.3));
+    animation: title-shimmer 4s ease-in-out infinite;
+}
+
+.title-line.accent {
+    font-size: 44px;
+    letter-spacing: 10px;
+    margin-top: 4px;
+}
+
+@keyframes title-shimmer {
+    0%, 100% {
+        filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 1))
+                drop-shadow(0 0 20px rgba(255, 215, 0, 0.3));
+    }
+    50% {
+        filter: drop-shadow(0 3px 8px rgba(0, 0, 0, 1))
+                drop-shadow(0 0 35px rgba(255, 215, 0, 0.6))
+                drop-shadow(0 0 50px rgba(255, 165, 0, 0.3));
+    }
+}
+
+.poster-subtitle {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    color: #DAA520;
+    text-transform: uppercase;
+    opacity: 0.85;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 1);
+}
+
+.close-btn {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #5C3A18 0%, #2A1810 100%);
+    border: 2px solid #DAA520;
+    color: #DAA520;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.25s ease;
+    box-shadow:
+        0 3px 10px rgba(0, 0, 0, 0.8),
+        inset 0 1px 2px rgba(255, 215, 0, 0.2);
+    line-height: 1;
+}
+
+.close-btn:hover {
+    background: linear-gradient(135deg, #8B5A2B 0%, #5C3A18 100%);
+    transform: rotate(90deg) scale(1.1);
+    box-shadow:
+        0 4px 14px rgba(218, 165, 32, 0.4),
+        inset 0 1px 2px rgba(255, 215, 0, 0.3);
+    color: #FFD700;
+}
+
+/* ========================================
+   上传区域
+   ======================================== */
+.drawer-content {
+    flex: 1;
+    padding: 32px 36px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+}
+
+.upload-zone {
+    width: 100%;
+}
+
+.upload-area {
+    display: block;
+    cursor: pointer;
+}
+
+.upload-frame {
+    position: relative;
+    padding: 40px 24px;
+    background:
+        linear-gradient(135deg, rgba(42, 24, 16, 0.6) 0%, rgba(26, 10, 0, 0.8) 100%);
+    border: 2px solid;
+    border-image: linear-gradient(
+        135deg,
+        #B8860B 0%,
+        #DAA520 25%,
+        #FFD700 50%,
+        #DAA520 75%,
+        #B8860B 100%
+    ) 1;
+    transition: all 0.35s ease;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    min-height: 200px;
+    justify-content: center;
+}
+
+.upload-frame:hover {
+    background: 
+        linear-gradient(135deg, rgba(58, 34, 22, 0.75) 0%, rgba(36, 16, 6, 0.9) 100%);
+    transform: scale(1.02);
+    box-shadow:
+        inset 0 0 30px rgba(255, 215, 0, 0.1),
+        0 0 40px rgba(218, 165, 32, 0.2);
+}
+
+.upload-frame:hover .upload-icon {
+    transform: scale(1.15) rotate(5deg);
+}
+
+.upload-frame:hover .icon-glow {
+    opacity: 1;
+}
+
+/* 框架四角装饰 */
+.frame-corner {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border-color: #FFD700;
+    border-style: solid;
+}
+
+.frame-corner.tl { top: -3px; left: -3px; border-width: 4px 0 0 4px; }
+.frame-corner.tr { top: -3px; right: -3px; border-width: 4px 4px 0 0; }
+.frame-corner.bl { bottom: -3px; left: -3px; border-width: 0 0 4px 4px; }
+.frame-corner.br { bottom: -3px; right: -3px; border-width: 0 4px 4px 0; }
+
+/* 上传图标 */
+.upload-icon-wrapper {
+    position: relative;
+}
+
+.upload-icon {
+    font-size: 56px;
+    display: block;
+    filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 1))
+            drop-shadow(0 0 20px rgba(255, 215, 0, 0.4));
+    transition: all 0.35s ease;
+}
+
+.icon-glow {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 80px;
+    height: 80px;
+    background: radial-gradient(circle, rgba(255, 215, 0, 0.3) 0%, transparent 70%);
+    opacity: 0;
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+}
+
+/* 上传文字组 */
+.upload-text-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+.upload-main-text {
+    font-family: 'Cinzel Decorative', serif;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: #FFD700;
+    text-transform: uppercase;
+    text-shadow:
+        0 2px 4px rgba(0, 0, 0, 1),
+        0 0 12px rgba(255, 215, 0, 0.3);
+}
+
+.upload-sub-text {
+    font-size: 13px;
+    font-style: italic;
+    color: #DAA520;
+    opacity: 0.8;
+    letter-spacing: 1px;
+}
+
+.upload-formats {
+    font-size: 11px;
+    color: #8B7355;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+/* ========================================
+   装饰分隔线
+   ======================================== */
+.ornamental-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 8px 0;
+}
+
+.ornamental-divider::before,
+.ornamental-divider::after {
+    content: '';
+    flex: 1;
+    max-width: 120px;
+    height: 1px;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        #DAA520 50%,
+        transparent 100%
+    );
+}
+
+.divider-diamond {
+    color: #DAA520;
+    font-size: 12px;
+    text-shadow: 0 0 8px rgba(218, 165, 32, 0.5);
+}
+
+/* ========================================
+   状态提示区
+   ======================================== */
+.status-section {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(218, 165, 32, 0.15);
+    border-radius: 4px;
+}
+
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.status-label {
+    font-family: 'Cinzel Decorative', serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: #8B7355;
+    text-transform: uppercase;
+}
+
+.status-value {
+    font-size: 13px;
+    font-weight: 600;
+    color: #DAA520;
+    letter-spacing: 1px;
+    text-align: right;
+    transition: all 0.3s ease;
+}
+
+.status-value.success {
+    color: #90EE90;
+    text-shadow: 0 0 10px rgba(144, 238, 144, 0.4);
+}
+
+.status-hint {
+    font-size: 11px;
+    color: #8B7355;
+    font-style: italic;
+    letter-spacing: 0.5px;
+}
+
+/* ========================================
+   底部装饰
+   ======================================== */
+.drawer-footer {
+    position: relative;
+    padding: 24px 36px 32px;
+    text-align: center;
+    border-top: 2px solid rgba(255, 215, 0, 0.2);
+}
+
+.footer-ornament {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.ornament-line {
+    width: 60px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #DAA520, transparent);
+}
+
+.ornament-star {
+    color: #DAA520;
+    font-size: 14px;
+    text-shadow: 0 0 8px rgba(218, 165, 32, 0.5);
+}
+
+.footer-text {
+    font-size: 11px;
+    color: #5C4A3A;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+/* ========================================
+   响应式适配
+   ======================================== */
+@media (max-width: 480px) {
+    .drawer-panel {
+        width: 100vw;
+        right: -100vw;
+    }
+
+    .poster-title .title-line {
+        font-size: 28px;
+        letter-spacing: 4px;
+    }
+
+    .poster-title .title-line.accent {
+        font-size: 32px;
+        letter-spacing: 6px;
+    }
+    
+    .upload-icon {
+        font-size: 44px;
+    }
+
+    .upload-main-text {
+        font-size: 15px;
+    }
+}
+
+/* 自定义滚动条 */
+.drawer-panel::-webkit-scrollbar {
+    width: 6px;
+}
+
+.drawer-panel::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.3);
+}
+
+.drawer-panel::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #DAA520, #8B6914);
+    border-radius: 3px;
+}
+
+.drawer-panel::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, #FFD700, #B8860B);
+}
+
+/* ========================================
+   左侧参数控制面板（Art Deco 风格）
+   ======================================== */
+.control-panel {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 300px;
+    height: 100vh;
+    z-index: 100;
+    transition: transform 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.control-panel.collapsed {
+    transform: translateX(-100%);
+}
+
+/* 收起时露出的独立展开标签（独立于面板外，避免被 transform 影响） */
+.ctrl-expand-tab {
+    position: fixed;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%) rotate(-90deg);
+    transform-origin: left center;
+    width: 90px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #2a1810 0%, #1a0a00 100%);
+    border: 2px solid;
+    border-image: linear-gradient(
+        90deg,
+        #B8860B,
+        #FFD700 30%,
+        #DAA520 70%,
+        #8B6914
+    ) 1;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+    z-index: 200;
+}
+
+.ctrl-expand-tab.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.ctrl-expand-tab:hover {
+    filter: drop-shadow(0 0 10px rgba(255, 215, 0, 0.5));
+}
+
+.ctrl-expand-tab span {
+    font-family: 'Cinzel Decorative', serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: #FFD700;
+    text-shadow: 0 0 8px rgba(255, 215, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 1);
+}
+
+.control-panel-inner {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background:
+        radial-gradient(ellipse at 50% 0%, rgba(15, 10, 25, 0.97) 0%, rgba(8, 5, 15, 0.99) 100%);
+    border-right: 2px solid;
+    border-image: linear-gradient(
+        180deg,
+        #FFD700 0%,
+        #DAA520 20%,
+        #B8860B 50%,
+        #DAA520 80%,
+        #FFD700 100%
+    ) 1;
+    box-shadow:
+        inset -30px 0 60px rgba(139, 69, 19, 0.06),
+        inset 10px 0 30px rgba(0, 0, 0, 0.5),
+        20px 0 60px rgba(0, 0, 0, 0.7);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* 面板头部 */
+.ctrl-header {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 16px;
+    border-bottom: 2px solid rgba(218, 165, 32, 0.2);
+    background: linear-gradient(
+        180deg,
+        rgba(42, 24, 16, 0.4) 0%,
+        transparent 100%
+    );
+    flex-shrink: 0;
+}
+
+.ctrl-title {
+    font-family: 'Cinzel Decorative', serif;
+    font-size: 13px;
+    font-weight: 900;
+    letter-spacing: 3px;
+    color: #FFD700;
+    text-shadow: 0 0 12px rgba(255, 215, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 1);
+    white-space: nowrap;
+}
+
+.ctrl-toggle {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #3A2518 0%, #1E0F08 100%);
+    border: 1.5px solid #B8860B;
+    border-radius: 4px;
+    color: #DAA520;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    line-height: 1;
+}
+
+.ctrl-toggle:hover {
+    background: linear-gradient(135deg, #5C3A18 0%, #2A1810 100%);
+    color: #FFD700;
+    box-shadow: 0 0 12px rgba(255, 215, 0, 0.25);
+}
+
+/* 面板主体（滚动区域） */
+.ctrl-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 10px 12px 16px;
+}
+
+/* 参数分组 */
+.ctrl-section {
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(218, 165, 32, 0.12);
+    border-radius: 4px;
+}
+
+.section-title {
+    font-family: 'Cinzel Decorative', serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: #DAA520;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(218, 165, 32, 0.12);
+    text-shadow: 0 0 8px rgba(218, 165, 32, 0.2);
+}
+
+/* 单行参数控件 */
+.ctrl-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.ctrl-row:last-child {
+    margin-bottom: 0;
+}
+
+.ctrl-label {
+    flex-shrink: 0;
+    width: 72px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    color: #A89070;
+    text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 自定义滑块 */
+.ctrl-slider {
+    flex: 1;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: linear-gradient(90deg, rgba(184, 134, 11, 0.2), rgba(184, 134, 11, 0.35));
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.ctrl-slider:hover {
+    background: linear-gradient(90deg, rgba(184, 134, 11, 0.3), rgba(184, 134, 11, 0.5));
+}
+
+/* 滑块滑块（Webkit） */
+.ctrl-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #FFD700, #B8860B);
+    border: 2px solid #5C4A0F;
+    cursor: pointer;
+    box-shadow:
+        0 0 8px rgba(255, 215, 0, 0.4),
+        0 2px 4px rgba(0, 0, 0, 0.6);
+    transition: all 0.2s ease;
+}
+
+.ctrl-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+    box-shadow:
+        0 0 14px rgba(255, 215, 0, 0.6),
+        0 2px 6px rgba(0, 0, 0, 0.7);
+    background: linear-gradient(135deg, #FFEC8B, #DAA520);
+}
+
+/* 滑块滑块（Firefox） */
+.ctrl-slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #FFD700, #B8860B);
+    border: 2px solid #5C4A0F;
+    cursor: pointer;
+    box-shadow: 0 0 8px rgba(255, 215, 0, 0.4);
+}
+
+/* 参数值显示 */
+.ctrl-value {
+    flex-shrink: 0;
+    width: 52px;
+    text-align: right;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    color: #FFD700;
+    letter-spacing: 0;
+    text-shadow: 0 0 6px rgba(255, 215, 0, 0.25);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 操作按钮区域 */
+.ctrl-actions {
+    display: flex;
+    gap: 10px;
+    padding: 12px 0 4px;
+    margin-top: 4px;
+    border-top: 1px solid rgba(218, 165, 32, 0.12);
+}
+
+.ctrl-btn {
+    flex: 1;
+    padding: 9px 0;
+    font-family: 'Cinzel Decorative', serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    border: 1.5px solid;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    line-height: 1.2;
+}
+
+.reset-btn {
+    background: linear-gradient(135deg, #2A1810 0%, #1A0A00 100%);
+    border-color: #B8860B;
+    color: #DAA520;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 1);
+}
+
+.reset-btn:hover {
+    background: linear-gradient(135deg, #3E2516 0%, #251000 100%);
+    color: #FFD700;
+    box-shadow: 0 0 16px rgba(255, 215, 0, 0.2), inset 0 0 12px rgba(255, 215, 0, 0.05);
+}
+
+.export-btn {
+    background: linear-gradient(135deg, #0A1628 0%, #060C18 100%);
+    border-color: #4682B4;
+    color: #87CEEB;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 1);
+}
+
+.export-btn:hover {
+    background: linear-gradient(135deg, #102040 0%, #0A1428 100%);
+    color: #ADD8E6;
+    box-shadow: 0 0 16px rgba(135, 206, 235, 0.2), inset 0 0 12px rgba(135, 206, 235, 0.04);
+}
+
+/* 控制面板自定义滚动条 */
+.ctrl-body::-webkit-scrollbar {
+    width: 4px;
+}
+
+.ctrl-body::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.ctrl-body::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #B8860B, #8B6914);
+    border-radius: 2px;
+}
+
+.ctrl-body::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, #DAA520, #B8860B);
+}
+
+/* ========================================
+   响应式：小屏幕隐藏控制面板
+   ======================================== */
+@media (max-width: 768px) {
+    .control-panel {
+        display: none;
+    }
+}
