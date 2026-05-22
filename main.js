@@ -1356,6 +1356,11 @@ function updateScatterPositions() {
     const t = easeInOutCubic(currentScrollProgress);
     const count = positions.length / 3;
 
+    // 获取飘散粒子当前帧颜色数据，用于亮度相关的浮雕深度调制
+    const scatterColorAttr = scatterGeometry.attributes.vColor3;
+    const hasColors = scatterColorAttr && scatterFrameColors.length > 0;
+    const colorArray = hasColors ? scatterColorAttr.array : null;
+
     // 波纹强度随聚合度增强
     const baseRippleStrength = 0.15 + t * 0.25;
 
@@ -1377,12 +1382,27 @@ function updateScatterPositions() {
         const depthFade = 1.0 - Math.abs(origZ) * 0.05;
         const clampedDepthFade = Math.max(0.4, Math.min(1.0, depthFade));
 
+        // ===== 根据颜色亮度调整波纹振幅（浮雕效果，与主粒子一致）=====
+        let depthModulation = 1.0;
+        let brightnessDepth = 0;
+        if (colorArray) {
+            const r = colorArray[idx];
+            const g = colorArray[idx + 1];
+            const b = colorArray[idx + 2];
+            const brightness = (r + g + b) / 3;
+            depthModulation = calculateDepthFromBrightness(brightness);
+            brightnessDepth = (brightness - 0.5) * 2.5;  // -1.25 ~ +1.25
+        }
+
         // ===== 始终生效的波纹动画 =====
-        const ripple = calculateRipple(currentX, currentY, time, baseRippleStrength * clampedDepthFade);
+        const ripple = calculateRipple(currentX, currentY, time, baseRippleStrength * clampedDepthFade * depthModulation);
         currentZ += ripple;
 
+        // 基于亮度的基础深度偏移（亮色凸起、暗色凹陷）
+        currentZ += brightnessDepth * 0.4 * t;
+
         // XY平面轻微跟随波纹倾斜
-        const tiltStrength = 0.008 * clampedDepthFade;
+        const tiltStrength = 0.008 * clampedDepthFade * depthModulation;
         currentX += Math.cos(origX * 0.4 + time * 0.7) * tiltStrength;
         currentY += Math.sin(origY * 0.35 + time * 0.6) * tiltStrength;
 
