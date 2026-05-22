@@ -36,8 +36,8 @@
                     </div>
                     <div class="ctrl-row">
                         <label for="bloom-threshold" class="ctrl-label">Threshold</label>
-                        <input type="range" id="bloom-threshold" min="0" max="1" step="0.05" value="0.5" class="ctrl-slider">
-                        <span class="ctrl-value" id="bloom-threshold-val">0.5</span>
+                        <input type="range" id="bloom-threshold" min="0" max="1" step="0.05" value="0.2" class="ctrl-slider">
+                        <span class="ctrl-value" id="bloom-threshold-val">0.2</span>
                     </div>
                 </section>
 
@@ -195,11 +195,11 @@
                             <div class="upload-text-group">
                                 <span class="upload-main-text">DROP IMAGE HERE</span>
                                 <span class="upload-sub-text">or click to browse</span>
-                                <span class="upload-formats">JPG / PNG supported</span>
+                                <span class="upload-formats">JPG / PNG / GIF supported</span>
                             </div>
                         </div>
                     </label>
-                    <input type="file" id="image-input" accept=".jpg,.jpeg,.png" hidden>
+                    <input type="file" id="image-input" accept=".jpg,.jpeg,.png,.gif" hidden>
                 </div>
 
                 <!-- 装饰分隔线 -->
@@ -240,7 +240,8 @@
     {
         "imports": {
             "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "gifuct-js": "https://esm.sh/gifuct-js@2.1.2"
         }
     }
     </script>
