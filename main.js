@@ -3,6 +3,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { parseGIF, decompressFrames } from 'gifuct-js';
 
 /**
  * 全局变量声明
@@ -11,6 +12,11 @@ let scene, camera, renderer, composer;
 let particleSystem = null;
 let particleGeometry = null;
 let particleMaterial = null;
+let scatterSystem = null;
+let scatterGeometry = null;
+let scatterMaterial = null;
+let scatterOriginalPositions = null;  // 飘散粒子聚合位置
+let scatterRandomPositions = null;    // 飘散粒子分散位置
 let controls = null;
 let bloomPass = null;
 let ambientLight = null;
@@ -26,6 +32,18 @@ let particleSizes = [];
 let targetScrollProgress = 0.3;
 let currentScrollProgress = 0.3;
 let clock = new THREE.Clock();
+
+// ===== GIF 动画相关变量 =====
+let gifFrames = [];              // GIF 各帧的 ImageData 数组
+let gifFrameColors = [];         // 每帧对应的粒子颜色数据（Float32Array[]）
+let gifFrameIndex = 0;           // 当前播放帧索引
+let gifLastFrameTime = 0;        // 上一帧切换时间戳
+let gifFrameDelay = 100;         // 帧间隔（毫秒），默认 100ms
+let isGifPlaying = false;        // 是否正在播放 GIF
+let gifCanvas = null;            // 用于合成 GIF 帧的离屏 Canvas
+let gifCtx = null;               // 离屏 Canvas 上下文
+let scatterFrameColors = [];     // 飘散粒子每帧对应的颜色数据（Float32Array[]）
+let scatterValidPixels = null;   // 飘散粒子的采样像素映射（复用于帧颜色提取）
 
 const SAMPLE_WIDTH = 400;
 const SAMPLE_HEIGHT = 400;
@@ -84,7 +102,7 @@ function initScene() {
         new THREE.Vector2(window.innerWidth, window.innerHeight),
         1.8,
         0.4,
-        0.5
+        0.2
     );
     composer.addPass(bloomPass);
 
@@ -113,24 +131,492 @@ function onWindowResize() {
 
 /**
  * 处理图片上传并解析像素数据
+ * 支持 JPG/PNG 静态图片和 GIF 动图
  * @param {Event} event - 文件选择事件对象
  */
 function handleImageUpload(event) {
     const file = event.target.files[0];
-    if (!file || !file.type.match(/image\/(jpeg|png)/)) {
-        alert('请上传 JPG 或 PNG 格式的图片');
+    if (!file) return;
+
+    const isGif = file.type === 'image/gif';
+
+    if (!isGif && !file.type.match(/image\/(jpeg|png)/)) {
+        alert('请上传 JPG、PNG 或 GIF 格式的图片');
         return;
     }
 
-    const reader = new FileReader();
-    reader.onload = function(e) {
-        const img = new Image();
-        img.onload = function() {
-            processImage(img);
+    if (isGif) {
+        handleGifUpload(file);
+    } else {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const img = new Image();
+            img.onload = function() {
+                processImage(img);
+            };
+            img.src = e.target.result;
         };
-        img.src = e.target.result;
+        reader.readAsDataURL(file);
+    }
+}
+
+/**
+ * 处理 GIF 文件上传
+ * 解析 GIF 帧数据，提取每帧像素颜色，用第一帧初始化粒子系统，后续帧驱动颜色动画
+ * @param {File} file - GIF 文件对象
+ */
+async function handleGifUpload(file) {
+    try {
+        updateStatus('✦ LOADING GIF... ✦', 'default');
+
+        const arrayBuffer = await file.arrayBuffer();
+        const gif = parseGIF(arrayBuffer);
+        const frames = decompressFrames(gif, true);
+
+        if (!frames || frames.length === 0) {
+            alert('无法解析此 GIF 文件');
+            return;
+        }
+
+        // 停止之前的 GIF 播放
+        isGifPlaying = false;
+        gifFrames = [];
+        gifFrameColors = [];
+        gifFrameIndex = 0;
+        scatterFrameColors = [];
+        scatterValidPixels = null;
+
+        // 计算采样尺寸（与静态图保持一致的宽高比逻辑）
+        const gifWidth = gif.lsd.width;
+        const gifHeight = gif.lsd.height;
+        const aspectRatio = gifWidth / gifHeight;
+        const clampedWidth = Math.min(Math.round(SAMPLE_HEIGHT * aspectRatio), 520);
+
+        // 创建离屏 Canvas 用于合成 GIF 帧
+        gifCanvas = document.createElement('canvas');
+        gifCanvas.width = clampedWidth;
+        gifCanvas.height = SAMPLE_HEIGHT;
+        gifCtx = gifCanvas.getContext('2d');
+
+        // 临时 Canvas 用于绘制单帧 patch
+        const patchCanvas = document.createElement('canvas');
+        patchCanvas.width = gifWidth;
+        patchCanvas.height = gifHeight;
+        const patchCtx = patchCanvas.getContext('2d');
+
+        // 预提取每帧的完整像素数据
+        // GIF 帧可能是局部 patch（只更新部分区域），需要逐帧合成完整画面
+        const fullCanvas = document.createElement('canvas');
+        fullCanvas.width = gifWidth;
+        fullCanvas.height = gifHeight;
+        const fullCtx = fullCanvas.getContext('2d');
+
+        // 记录采样映射：哪些像素位置对应哪些粒子
+        // 先用第一帧建立映射，后续帧复用同一映射
+        let samplingMap = null;
+
+        for (let f = 0; f < frames.length; f++) {
+            const frame = frames[f];
+            const patchImageData = frame.patch;
+            const dims = frame.dims;
+
+            // 将当前帧 patch 绘制到 patchCanvas
+            const imgData = new ImageData(
+                new Uint8ClampedArray(patchImageData),
+                dims.width,
+                dims.height
+            );
+            patchCtx.clearRect(0, 0, gifWidth, gifHeight);
+
+            // 处理 GIF 帧的 disposal 方式
+            if (frame.disposalType === 2) {
+                // 恢复为背景色（清除上一帧区域）
+                fullCtx.clearRect(dims.left, dims.top, dims.width, dims.height);
+            } else if (frame.disposalType === 3) {
+                // 恢复为前一帧（暂不处理，简单方案直接覆盖）
+            }
+
+            // 将 patch 绘制到完整画布上
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = dims.width;
+            tempCanvas.height = dims.height;
+            tempCanvas.getContext('2d').putImageData(imgData, 0, 0);
+            fullCtx.drawImage(tempCanvas, dims.left, dims.top);
+
+            // 从完整画布采样到目标尺寸
+            gifCtx.clearRect(0, 0, clampedWidth, SAMPLE_HEIGHT);
+            gifCtx.drawImage(fullCanvas, 0, 0, clampedWidth, SAMPLE_HEIGHT);
+
+            const sampledImageData = gifCtx.getImageData(0, 0, clampedWidth, SAMPLE_HEIGHT);
+            gifFrames.push(sampledImageData);
+
+            // 提取该帧的粒子颜色数据
+            const result = extractColorsFromImageData(
+                sampledImageData,
+                clampedWidth,
+                SAMPLE_HEIGHT,
+                f === 0 ? null : samplingMap  // 第一帧建立映射，后续帧复用
+            );
+
+            if (f === 0) {
+                // 第一帧：建立粒子系统，保存采样映射
+                samplingMap = result.samplingMap;
+                gifFrameColors.push(result.colors);
+            } else {
+                // 后续帧：只保存颜色数据，复用映射
+                gifFrameColors.push(result.colors);
+            }
+
+            // 同时提取飘散粒子该帧的颜色数据
+            const scatterResult = extractScatterColorsFromImageData(
+                sampledImageData,
+                clampedWidth,
+                SAMPLE_HEIGHT,
+                f === 0 ? null : scatterValidPixels
+            );
+            if (f === 0) {
+                scatterValidPixels = scatterResult.pixelMap;
+            }
+            scatterFrameColors.push(scatterResult.colors);
+        }
+
+        // 使用第一帧数据初始化粒子系统
+        initializeParticlesFromGif(gifFrames[0], clampedWidth, SAMPLE_HEIGHT, samplingMap);
+
+        // 设置帧延迟（取第一帧的 delay，单位 1/100 秒）
+        gifFrameDelay = frames[0].delay || 10;
+        if (gifFrameDelay < 2) gifFrameDelay = 10;  // 极短延迟保护
+
+        // 启动 GIF 播放
+        isGifPlaying = true;
+        gifLastFrameTime = performance.now();
+        gifFrameIndex = 0;
+
+        updateStatus('✦ GIF LOADED ✦', 'success');
+
+        // 播放入场动画
+        targetScrollProgress = 0;
+        currentScrollProgress = 0;
+
+        setTimeout(() => {
+            closeDrawer();
+        }, 800);
+
+        const animationDuration = 4000;
+        const animationStart = performance.now();
+
+        function playGatherAnimation(currentTime) {
+            const elapsed = currentTime - animationStart;
+            const progress = Math.min(elapsed / animationDuration, 1);
+            const easedProgress = 1 - (1 - progress) * (1 - progress);
+            targetScrollProgress = easedProgress * 1.0;
+            if (progress < 1) {
+                requestAnimationFrame(playGatherAnimation);
+            }
+        }
+
+        requestAnimationFrame(playGatherAnimation);
+
+    } catch (err) {
+        console.error('GIF 解析失败:', err);
+        alert('GIF 解析失败，请尝试其他文件');
+        updateStatus('✦ GIF LOAD FAILED ✦', 'default');
+    }
+}
+
+/**
+ * 从 ImageData 提取粒子颜色数据
+ * 支持两种模式：首次调用建立采样映射，后续调用复用映射
+ * @param {ImageData} imageData - 帧的像素数据
+ * @param {number} width - 采样宽度
+ * @param {number} height - 采样高度
+ * @param {Array|null} existingMap - 已有的采样映射（null 时新建映射）
+ * @returns {{ colors: Float32Array, samplingMap: Array }} 颜色数组和采样映射
+ */
+function extractColorsFromImageData(imageData, width, height, existingMap) {
+    const data = imageData.data;
+    const scaleX = 0.065;
+    const scaleY = 0.065;
+    const colors = [];
+    const samplingMap = existingMap || [];
+
+    // 如果没有已有映射，需要新建（第一帧）
+    if (!existingMap) {
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const i = (y * width + x) * 4;
+                const r = data[i] / 255;
+                const g = data[i + 1] / 255;
+                const b = data[i + 2] / 255;
+                const a = data[i + 3] / 255;
+
+                if (a < 0.1) continue;
+
+                const brightness = (r + g + b) / 3;
+                if (brightness < 0.01) continue;
+
+                const probability = Math.min(1, brightness * 0.92 + 0.35);
+                if (Math.random() > probability) continue;
+
+                // 记录该粒子的像素坐标和随机种子
+                samplingMap.push({ x, y, seed: Math.random() });
+                colors.push(r, g, b);
+            }
+        }
+    } else {
+        // 复用已有映射，按相同顺序提取颜色
+        for (let m = 0; m < existingMap.length; m++) {
+            const { x, y, seed } = existingMap[m];
+            const i = (y * width + x) * 4;
+
+            let r = data[i] / 255;
+            let g = data[i + 1] / 255;
+            let b = data[i + 2] / 255;
+            const a = data[i + 3] / 255;
+
+            // 透明像素保留上一帧颜色（通过使用 0,0,0，后续在播放时跳过）
+            if (a < 0.1) {
+                r = 0; g = 0; b = 0;
+            }
+
+            colors.push(r, g, b);
+        }
+    }
+
+    return {
+        colors: new Float32Array(colors),
+        samplingMap
     };
-    reader.readAsDataURL(file);
+}
+
+/**
+ * 使用 GIF 第一帧数据初始化粒子系统
+ * 与 processImage 逻辑一致，但使用预提取的采样映射确保帧间粒子对应关系一致
+ * @param {ImageData} firstFrame - 第一帧的像素数据
+ * @param {number} clampedWidth - 采样宽度
+ * @param {number} clampedHeight - 采样高度
+ * @param {Array} samplingMap - 采样映射（包含像素坐标和随机种子）
+ */
+function initializeParticlesFromGif(firstFrame, clampedWidth, clampedHeight, samplingMap) {
+    const data = firstFrame.data;
+    const scaleX = 0.065;
+    const scaleY = 0.065;
+
+    originalPositions = [];
+    randomPositions = [];
+    randomZOffsets = [];
+    particleColors = [];
+    particleSizes = [];
+
+    for (let m = 0; m < samplingMap.length; m++) {
+        const { x, y, seed } = samplingMap[m];
+        const i = (y * clampedWidth + x) * 4;
+        const r = data[i] / 255;
+        const g = data[i + 1] / 255;
+        const b = data[i + 2] / 255;
+        const a = data[i + 3] / 255;
+
+        if (a < 0.1) continue;
+
+        const brightness = (r + g + b) / 3;
+        if (brightness < 0.01) continue;
+
+        const baseX = (x - clampedWidth / 2) * scaleX;
+        const baseY = -(y - clampedHeight / 2) * scaleY;
+
+        const jitterStrength = 0.03 + seed * 0.04;
+        const jitterX = (seed - 0.5) * jitterStrength;
+        const jitterY = ((seed * 1.7) % 1 - 0.5) * jitterStrength;
+
+        const posX = baseX + jitterX;
+        const posY = baseY + jitterY;
+
+        originalPositions.push(posX, posY, 0);
+
+        // 放射状分散位置
+        const distFromCenter = Math.sqrt(posX * posX + posY * posY);
+        const angleFromCenter = Math.atan2(posY, posX);
+
+        const baseBlastRadius = SPREAD_FACTOR * (0.6 + seed * 1.2);
+        const distanceScale = 1.5 + (distFromCenter / 8.0) * 2.0;
+        const blastRadius = baseBlastRadius * distanceScale;
+
+        const angleSpread = ((seed * 3.1) % 1 - 0.5) * (Math.PI / 3.6);
+        const blastAngle = angleFromCenter + angleSpread;
+
+        const randomX = Math.cos(blastAngle) * blastRadius;
+        const randomY = Math.sin(blastAngle) * blastRadius;
+
+        const zDirection = Math.sign(posX * Math.cos(angleFromCenter) + posY * Math.sin(angleFromCenter));
+        const randomZ = zDirection * (seed * MAX_Z_DEPTH * 1.5) + ((seed * 2.3) % 1 - 0.5) * MAX_Z_DEPTH;
+
+        randomPositions.push(randomX, randomY, randomZ);
+        randomZOffsets.push(randomZ);
+
+        particleColors.push(r, g, b);
+
+        const brightnessFactor = 0.5 + brightness * 0.9;
+        const randomScale = 0.6 + seed * 0.8;
+        const size = PARTICLE_SIZE_BASE * brightnessFactor * randomScale;
+        particleSizes.push(size);
+    }
+
+    createParticleSystem();
+    createScatterSystem(data, clampedWidth, clampedHeight);
+}
+
+/**
+ * 从 ImageData 提取飘散粒子颜色数据（用于 GIF 帧动画）
+ * 采样逻辑与 createScatterSystem 完全一致：隔3像素采样 + Z轴深度柱
+ * @param {ImageData} imageData - 帧的像素数据
+ * @param {number} width - 采样宽度
+ * @param {number} height - 采样高度
+ * @param {Array|null} existingPixelMap - 已有的像素映射（null 时新建映射）
+ * @returns {{ colors: Float32Array, pixelMap: Array }} 颜色数组和像素映射
+ */
+function extractScatterColorsFromImageData(imageData, width, height, existingPixelMap) {
+    const data = imageData.data;
+    const SAMPLE_STEP = 3;
+    const colors = [];
+    const pixelMap = existingPixelMap || [];
+
+    if (!existingPixelMap) {
+        // 第一帧：建立像素映射
+        for (let y = 0; y < height; y += SAMPLE_STEP) {
+            for (let x = 0; x < width; x += SAMPLE_STEP) {
+                const pi = (y * width + x) * 4;
+                const r = data[pi] / 255;
+                const g = data[pi + 1] / 255;
+                const b = data[pi + 2] / 255;
+                const a = data[pi + 3] / 255;
+                const brightness = (r + g + b) / 3;
+
+                if (a < 0.1 || brightness < 0.05) continue;
+
+                const forwardLayers = brightness > 0.4
+                    ? Math.floor(1 + brightness * 2)
+                    : Math.floor(1 + brightness * 1);
+                const backwardLayers = brightness < 0.6
+                    ? Math.floor(1 + (1 - brightness) * 2)
+                    : Math.floor(1 + (1 - brightness) * 1);
+
+                pixelMap.push({ x, y, forwardLayers, backwardLayers });
+
+                // 前方深度柱颜色
+                for (let layer = 1; layer <= forwardLayers; layer++) {
+                    const fadeFactor = 1.0 - (layer / (forwardLayers + 1)) * 0.3;
+                    colors.push(
+                        Math.min(1, r * fadeFactor * 1.1),
+                        Math.min(1, g * fadeFactor * 1.1),
+                        Math.min(1, b * fadeFactor * 1.1)
+                    );
+                }
+
+                // 后方深度柱颜色
+                for (let layer = 1; layer <= backwardLayers; layer++) {
+                    const fadeFactor = 1.0 - (layer / (backwardLayers + 1)) * 0.4;
+                    colors.push(
+                        Math.min(1, r * fadeFactor * 0.9),
+                        Math.min(1, g * fadeFactor * 0.92),
+                        Math.min(1, b * fadeFactor * 1.05)
+                    );
+                }
+            }
+        }
+    } else {
+        // 后续帧：复用像素映射，只提取颜色
+        for (let m = 0; m < existingPixelMap.length; m++) {
+            const { x, y, forwardLayers, backwardLayers } = existingPixelMap[m];
+            const pi = (y * width + x) * 4;
+            const r = data[pi] / 255;
+            const g = data[pi + 1] / 255;
+            const b = data[pi + 2] / 255;
+            const a = data[pi + 3] / 255;
+
+            const cr = a < 0.1 ? 0 : r;
+            const cg = a < 0.1 ? 0 : g;
+            const cb = a < 0.1 ? 0 : b;
+
+            // 前方深度柱颜色
+            for (let layer = 1; layer <= forwardLayers; layer++) {
+                const fadeFactor = 1.0 - (layer / (forwardLayers + 1)) * 0.3;
+                colors.push(
+                    Math.min(1, cr * fadeFactor * 1.1),
+                    Math.min(1, cg * fadeFactor * 1.1),
+                    Math.min(1, cb * fadeFactor * 1.1)
+                );
+            }
+
+            // 后方深度柱颜色
+            for (let layer = 1; layer <= backwardLayers; layer++) {
+                const fadeFactor = 1.0 - (layer / (backwardLayers + 1)) * 0.4;
+                colors.push(
+                    Math.min(1, cr * fadeFactor * 0.9),
+                    Math.min(1, cg * fadeFactor * 0.92),
+                    Math.min(1, cb * fadeFactor * 1.05)
+                );
+            }
+        }
+    }
+
+    return {
+        colors: new Float32Array(colors),
+        pixelMap
+    };
+}
+
+/**
+ * 更新 GIF 帧动画
+ * 在主动画循环中调用，按帧间隔切换粒子颜色
+ * @param {number} currentTime - 当前时间戳（performance.now()）
+ */
+function updateGifFrame(currentTime) {
+    if (!isGifPlaying || gifFrameColors.length <= 1) return;
+    if (!particleGeometry) return;
+
+    const elapsed = currentTime - gifLastFrameTime;
+    if (elapsed < gifFrameDelay) return;
+
+    // 切换到下一帧
+    gifFrameIndex = (gifFrameIndex + 1) % gifFrameColors.length;
+    gifLastFrameTime = currentTime;
+
+    const frameColors = gifFrameColors[gifFrameIndex];
+    if (!frameColors || frameColors.length === 0) return;
+
+    // 更新粒子颜色 buffer
+    const colorAttr = particleGeometry.attributes.vColor3;
+    if (!colorAttr) return;
+
+    const colorArray = colorAttr.array;
+    const len = Math.min(colorArray.length, frameColors.length);
+
+    for (let i = 0; i < len; i++) {
+        colorArray[i] = frameColors[i];
+    }
+
+    colorAttr.needsUpdate = true;
+
+    // 同步更新全局 particleColors（供波纹等效果使用）
+    for (let i = 0; i < len; i++) {
+        particleColors[i] = frameColors[i];
+    }
+
+    // 同步更新飘散粒子颜色
+    if (scatterGeometry && scatterFrameColors.length > 0) {
+        const scatterColorAttr = scatterGeometry.attributes.vColor3;
+        if (scatterColorAttr) {
+            const scatterFrameColor = scatterFrameColors[gifFrameIndex];
+            if (scatterFrameColor && scatterFrameColor.length > 0) {
+                const scatterColorArray = scatterColorAttr.array;
+                const scatterLen = Math.min(scatterColorArray.length, scatterFrameColor.length);
+                for (let i = 0; i < scatterLen; i++) {
+                    scatterColorArray[i] = scatterFrameColor[i];
+                }
+                scatterColorAttr.needsUpdate = true;
+            }
+        }
+    }
 }
 
 /**
@@ -140,6 +626,14 @@ function handleImageUpload(event) {
  * @param {HTMLImageElement} img - 已加载的图片元素
  */
 function processImage(img) {
+    // 上传静态图时停止 GIF 播放
+    isGifPlaying = false;
+    gifFrames = [];
+    gifFrameColors = [];
+    gifFrameIndex = 0;
+    scatterFrameColors = [];
+    scatterValidPixels = null;
+
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
 
@@ -234,6 +728,7 @@ function processImage(img) {
     }
 
     createParticleSystem();
+    createScatterSystem(data, clampedWidth, SAMPLE_HEIGHT);
 
     updateStatus('✦ IMAGE LOADED ✦', 'success');
 
@@ -412,6 +907,245 @@ function createParticleSystem() {
 
     particleSystem = new THREE.Points(particleGeometry, particleMaterial);
     scene.add(particleSystem);
+}
+
+/**
+ * 创建Z轴深度挤出粒子系统
+ * 对图片每个采样像素，沿Z轴方向生成一串同色粒子（深度柱）
+ * 亮色区域向前凸出更长，暗色区域向后延伸，形成3D浮雕立体效果
+ * @param {Uint8ClampedArray} data - 图片像素数据
+ * @param {number} width - 采样宽度
+ * @param {number} height - 采样高度
+ */
+function createScatterSystem(data, width, height) {
+    // 清理旧的飘散粒子系统
+    if (scatterSystem !== null) {
+        scene.remove(scatterSystem);
+        scatterGeometry.dispose();
+        scatterMaterial.dispose();
+    }
+
+    const scaleX = 0.065;
+    const scaleY = 0.065;
+
+    // 收集图片有效像素，隔3像素采样控制密度
+    const SAMPLE_STEP = 3;
+    const validPixels = [];
+    for (let y = 0; y < height; y += SAMPLE_STEP) {
+        for (let x = 0; x < width; x += SAMPLE_STEP) {
+            const pi = (y * width + x) * 4;
+            const r = data[pi] / 255;
+            const g = data[pi + 1] / 255;
+            const b = data[pi + 2] / 255;
+            const a = data[pi + 3] / 255;
+            const brightness = (r + g + b) / 3;
+
+            if (a < 0.1 || brightness < 0.05) continue;
+            validPixels.push({ x, y, r, g, b, brightness });
+        }
+    }
+
+    // 每个像素沿Z轴生成一串粒子（深度柱）
+    // 亮色：向前挤出长（2~6层），暗色：向后挤出（1~3层）
+    const allPositions = [];
+    const allColors = [];
+    const allSizes = [];
+
+    for (let p = 0; p < validPixels.length; p++) {
+        const pixel = validPixels[p];
+
+        // XY位置：与图片像素位置精确对应
+        const posX = (pixel.x - width / 2) * scaleX;
+        const posY = -(pixel.y - height / 2) * scaleY;
+
+        // 基于亮度计算深度柱的长度和方向
+        // 亮度 > 0.5：向前凸出（靠近摄像机）
+        // 亮度 <= 0.5：向后凹陷（远离摄像机）
+        const brightness = pixel.brightness;
+
+        // 前方深度柱层数（亮色更多层）
+        const forwardLayers = brightness > 0.4
+            ? Math.floor(1 + brightness * 2)     // 1~3层
+            : Math.floor(1 + brightness * 1);     // 1~2层
+
+        // 后方深度柱层数（暗色更多层）
+        const backwardLayers = brightness < 0.6
+            ? Math.floor(1 + (1 - brightness) * 2)  // 1~3层
+            : Math.floor(1 + (1 - brightness) * 1);  // 1~2层
+
+        // 前方深度柱：从Z=0向摄像机方向逐层放置
+        const forwardStep = 0.6 + brightness * 0.8;  // 每层间距：0.6~1.4
+        for (let layer = 1; layer <= forwardLayers; layer++) {
+            const zPos = layer * forwardStep * (0.7 + Math.random() * 0.6);
+            // 越远离主平面的粒子XY抖动越大，形成"扩散"感
+            const spread = layer * 0.04;
+            allPositions.push(
+                posX + (Math.random() - 0.5) * spread,
+                posY + (Math.random() - 0.5) * spread,
+                zPos
+            );
+            // 颜色：越远越淡（模拟雾化/空气透视）
+            const fadeFactor = 1.0 - (layer / (forwardLayers + 1)) * 0.3;
+            allColors.push(
+                Math.min(1, pixel.r * fadeFactor * 1.1),
+                Math.min(1, pixel.g * fadeFactor * 1.1),
+                Math.min(1, pixel.b * fadeFactor * 1.1)
+            );
+            // 大小：越远越小（靠近摄像机的会被透视放大）
+            const sizeFade = 1.0 - (layer / (forwardLayers + 1)) * 0.3;
+            allSizes.push((0.06 + Math.random() * 0.04) * sizeFade);
+        }
+
+        // 后方深度柱：从Z=0向远离摄像机方向逐层放置
+        const backwardStep = 0.5 + (1 - brightness) * 0.7;  // 每层间距：0.5~1.2
+        for (let layer = 1; layer <= backwardLayers; layer++) {
+            const zPos = -(layer * backwardStep * (0.7 + Math.random() * 0.6));
+            const spread = layer * 0.03;
+            allPositions.push(
+                posX + (Math.random() - 0.5) * spread,
+                posY + (Math.random() - 0.5) * spread,
+                zPos
+            );
+            // 后方粒子颜色偏冷偏暗
+            const fadeFactor = 1.0 - (layer / (backwardLayers + 1)) * 0.4;
+            allColors.push(
+                Math.min(1, pixel.r * fadeFactor * 0.9),
+                Math.min(1, pixel.g * fadeFactor * 0.92),
+                Math.min(1, pixel.b * fadeFactor * 1.05)  // 蓝通道略增，偏冷
+            );
+            allSizes.push((0.05 + Math.random() * 0.035) * fadeFactor);
+        }
+    }
+
+    const totalCount = allPositions.length / 3;
+    const finalPositions = new Float32Array(allPositions);
+    const finalColors = new Float32Array(allColors);
+    const finalSizes = new Float32Array(allSizes);
+
+    // 存储聚合位置（深度柱位置）
+    scatterOriginalPositions = new Float32Array(finalPositions);
+
+    // 生成分散位置：沿中心放射状爆炸
+    scatterRandomPositions = new Float32Array(finalPositions.length);
+    for (let i = 0; i < totalCount; i++) {
+        const ox = scatterOriginalPositions[i * 3];
+        const oy = scatterOriginalPositions[i * 3 + 1];
+
+        const distFromCenter = Math.sqrt(ox * ox + oy * oy);
+        const angleFromCenter = Math.atan2(oy, ox);
+
+        // 放射状爆炸距离
+        const blastRadius = SPREAD_FACTOR * (0.5 + Math.random() * 1.0);
+        const distanceScale = 1.2 + (distFromCenter / 8.0) * 1.5;
+        const angleSpread = (Math.random() - 0.5) * (Math.PI / 3.6);
+        const blastAngle = angleFromCenter + angleSpread;
+
+        scatterRandomPositions[i * 3] = Math.cos(blastAngle) * blastRadius * distanceScale;
+        scatterRandomPositions[i * 3 + 1] = Math.sin(blastAngle) * blastRadius * distanceScale;
+        // Z轴也随机分散
+        const zDirection = Math.sign(ox) || 1;
+        scatterRandomPositions[i * 3 + 2] = zDirection * Math.random() * MAX_Z_DEPTH + (Math.random() - 0.5) * MAX_Z_DEPTH;
+    }
+
+    scatterGeometry = new THREE.BufferGeometry();
+    scatterGeometry.setAttribute('position', new THREE.BufferAttribute(finalPositions, 3));
+    scatterGeometry.setAttribute('vColor3', new THREE.BufferAttribute(finalColors, 3));
+    scatterGeometry.setAttribute('size', new THREE.BufferAttribute(finalSizes, 1));
+
+    scatterMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+            time: { value: 0 },
+            uGlowDecay: { value: 4.0 },
+            uColorGlowMult: { value: 2.0 },
+            uCoreBrightness: { value: 0.6 },
+            uPulseAmp: { value: 0.06 },
+            uFlowGlowAmp: { value: 0.05 },
+            uDepthFactor: { value: 0.12 }
+        },
+        vertexShader: `
+            attribute float size;
+            attribute vec3 vColor3;
+            varying vec3 vColor;
+            varying float vDistance;
+            varying float vDepth;
+            uniform float time;
+            uniform float uPulseAmp;
+            uniform float uDepthFactor;
+
+            void main() {
+                vColor = vColor3;
+                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                vDistance = -mvPosition.z;
+                vDepth = position.z;
+
+                float sizeAttenuation = 400.0 / vDistance;
+                gl_PointSize = size * sizeAttenuation;
+
+                // Z轴深度影响
+                float depthFactor = 1.0 + position.z * uDepthFactor;
+                gl_PointSize *= depthFactor;
+
+                // 脉动动画
+                float pulse = 1.0 + sin(time * 2.0 + position.x * 4.0 + position.z * 3.0) * uPulseAmp;
+                gl_PointSize *= pulse;
+
+                gl_PointSize = clamp(gl_PointSize, 0.5, 35.0);
+
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `,
+        fragmentShader: `
+            varying vec3 vColor;
+            varying float vDistance;
+            varying float vDepth;
+            uniform float time;
+            uniform float uGlowDecay;
+            uniform float uColorGlowMult;
+            uniform float uCoreBrightness;
+            uniform float uFlowGlowAmp;
+
+            void main() {
+                vec2 center = gl_PointCoord - vec2(0.5);
+                float dist = length(center);
+
+                if (dist > 0.5) discard;
+
+                float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
+                float glow = exp(-dist * uGlowDecay);
+
+                vec3 finalColor = vColor * (1.0 + glow * uColorGlowMult);
+                finalColor += vec3(0.1, 0.12, 0.18) * glow * 0.3;
+
+                float coreBrightness = exp(-dist * 10.0) * uCoreBrightness;
+                finalColor += vec3(coreBrightness);
+
+                // 深度色调偏移
+                float depthTint = smoothstep(-5.0, 5.0, vDepth);
+                finalColor = mix(
+                    finalColor * vec3(0.8, 0.85, 1.1),
+                    finalColor * vec3(1.15, 1.05, 0.85),
+                    depthTint
+                );
+
+                // 深度淡出
+                float depthFade = smoothstep(50.0, 6.0, vDistance);
+                float zFade = smoothstep(-5.0, 5.0, vDepth) * 0.1 + 0.9;
+                alpha *= depthFade * zFade;
+
+                // 流水动态辉光
+                float flowGlow = sin(time * 1.5 + vDepth * 2.5) * uFlowGlowAmp + (1.0 - uFlowGlowAmp * 0.33);
+                finalColor *= flowGlow;
+
+                gl_FragColor = vec4(finalColor, alpha * 0.85);
+            }
+        `,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending
+    });
+
+    scatterSystem = new THREE.Points(scatterGeometry, scatterMaterial);
+    scene.add(scatterSystem);
 }
 
 /**
@@ -601,6 +1335,75 @@ function calculateRipple(x, y, time, strength) {
 }
 
 /**
+ * 更新飘散粒子位置
+ * 根据滚动进度在聚合位置（深度柱）和分散位置之间插值
+ * 聚合时粒子回到Z轴深度柱位置，分散时沿放射状飞散
+ * 所有状态下都有持续的波纹和漂浮动画，避免粒子看起来静止
+ */
+function updateScatterPositions() {
+    if (!scatterSystem || !scatterGeometry) return;
+    if (!scatterOriginalPositions || !scatterRandomPositions) return;
+
+    const positions = scatterGeometry.attributes.position.array;
+    const time = clock.getElapsedTime();
+
+    // 更新shader时间
+    if (scatterMaterial && scatterMaterial.uniforms.time) {
+        scatterMaterial.uniforms.time.value = time;
+    }
+
+    // 使用与主粒子相同的缓动进度
+    const t = easeInOutCubic(currentScrollProgress);
+    const count = positions.length / 3;
+
+    // 波纹强度随聚合度增强
+    const baseRippleStrength = 0.15 + t * 0.25;
+
+    for (let i = 0; i < count; i++) {
+        const idx = i * 3;
+        const origX = scatterOriginalPositions[idx];
+        const origY = scatterOriginalPositions[idx + 1];
+        const origZ = scatterOriginalPositions[idx + 2];
+        const randX = scatterRandomPositions[idx];
+        const randY = scatterRandomPositions[idx + 1];
+        const randZ = scatterRandomPositions[idx + 2];
+
+        // 在聚合位置和分散位置之间插值
+        let currentX = origX * t + randX * (1 - t);
+        let currentY = origY * t + randY * (1 - t);
+        let currentZ = origZ * t + randZ * (1 - t);
+
+        // 深度柱粒子根据Z位置调整波纹强度
+        const depthFade = 1.0 - Math.abs(origZ) * 0.05;
+        const clampedDepthFade = Math.max(0.4, Math.min(1.0, depthFade));
+
+        // ===== 始终生效的波纹动画 =====
+        const ripple = calculateRipple(currentX, currentY, time, baseRippleStrength * clampedDepthFade);
+        currentZ += ripple;
+
+        // XY平面轻微跟随波纹倾斜
+        const tiltStrength = 0.008 * clampedDepthFade;
+        currentX += Math.cos(origX * 0.4 + time * 0.7) * tiltStrength;
+        currentY += Math.sin(origY * 0.35 + time * 0.6) * tiltStrength;
+
+        // 分散状态额外添加随机漂浮
+        if (t < 0.5) {
+            const driftFactor = (1 - t / 0.5) * 0.4;
+            const seed = i * 0.73;
+            currentX += Math.sin(time * 0.8 + seed) * driftFactor;
+            currentY += Math.cos(time * 0.6 + seed * 1.3) * driftFactor;
+            currentZ += Math.sin(time * 0.5 + seed * 0.7) * driftFactor * 0.5;
+        }
+
+        positions[idx] = currentX;
+        positions[idx + 1] = currentY;
+        positions[idx + 2] = currentZ;
+    }
+
+    scatterGeometry.attributes.position.needsUpdate = true;
+}
+
+/**
  * 三次方缓动函数
  * 实现平滑的非线性过渡效果
  * @param {number} t - 输入进度值 [0, 1]
@@ -621,6 +1424,9 @@ function animate() {
 
     updateParticlePositions();
 
+    // 更新 GIF 帧动画
+    updateGifFrame(performance.now());
+
     if (controls) {
         controls.update();
     }
@@ -628,6 +1434,9 @@ function animate() {
     if (particleMaterial && particleMaterial.uniforms.time) {
         particleMaterial.uniforms.time.value = clock.getElapsedTime();
     }
+
+    // 更新飘散粒子：轻微漂浮动画
+    updateScatterPositions();
 
     composer.render();
 }
@@ -695,7 +1504,7 @@ function updateStatus(text, type) {
 const DEFAULT_CONFIG = {
     bloomStrength: 1.8,
     bloomRadius: 0.4,
-    bloomThreshold: 0.5,
+    bloomThreshold: 0.2,
     particleSize: 0.085,
     particleSpread: 20,
     glowDecay: 5.0,
