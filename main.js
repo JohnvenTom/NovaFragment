@@ -196,7 +196,7 @@ async function handleGifUpload(file) {
         gifCanvas = document.createElement('canvas');
         gifCanvas.width = clampedWidth;
         gifCanvas.height = SAMPLE_HEIGHT;
-        gifCtx = gifCanvas.getContext('2d');
+        gifCtx = gifCanvas.getContext('2d', { willReadFrequently: true });
 
         // 临时 Canvas 用于绘制单帧 patch
         const patchCanvas = document.createElement('canvas');
@@ -584,6 +584,17 @@ function updateGifFrame(currentTime) {
     const frameColors = gifFrameColors[gifFrameIndex];
     if (!frameColors || frameColors.length === 0) return;
 
+    // 诊断：记录主粒子与飘散粒子的颜色数组长度对比（仅首次帧切换时输出一次）
+    if (!updateGifFrame._hasLogged && gifFrameIndex === 1) {
+        updateGifFrame._hasLogged = true;
+        const scatterAttr = scatterGeometry ? scatterGeometry.attributes.vColor3 : null;
+        console.log('[GIF帧切换诊断] frameIndex:', gifFrameIndex,
+            '主粒子颜色长度:', frameColors.length,
+            '飘散粒子颜色长度:', scatterAttr ? scatterAttr.array.length : 'N/A',
+            'scatterFrameColors长度:', scatterFrameColors.length,
+            '本次scatterFrameColor长度:', scatterFrameColors[gifFrameIndex] ? scatterFrameColors[gifFrameIndex].length : 'N/A');
+    }
+
     // 更新粒子颜色 buffer
     const colorAttr = particleGeometry.attributes.vColor3;
     if (!colorAttr) return;
@@ -614,8 +625,14 @@ function updateGifFrame(currentTime) {
                     scatterColorArray[i] = scatterFrameColor[i];
                 }
                 scatterColorAttr.needsUpdate = true;
+            } else {
+                console.warn('[scatter] scatterFrameColor 为空或长度为零, frameIndex:', gifFrameIndex, 'scatterFrameColors.length:', scatterFrameColors.length);
             }
+        } else {
+            console.warn('[scatter] scatterGeometry.attributes.vColor3 不存在');
         }
+    } else if (!scatterGeometry) {
+        console.warn('[scatter] scatterGeometry 为 null，跳过颜色更新');
     }
 }
 
@@ -635,7 +652,7 @@ function processImage(img) {
     scatterValidPixels = null;
 
     const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
     // 计算保持宽高比的尺寸：固定高度，宽度自适应
     const aspectRatio = img.width / img.height;
@@ -1358,8 +1375,7 @@ function updateScatterPositions() {
 
     // 获取飘散粒子当前帧颜色数据，用于亮度相关的浮雕深度调制
     const scatterColorAttr = scatterGeometry.attributes.vColor3;
-    const hasColors = scatterColorAttr && scatterFrameColors.length > 0;
-    const colorArray = hasColors ? scatterColorAttr.array : null;
+    const colorArray = (scatterColorAttr && scatterFrameColors.length > 0) ? scatterColorAttr.array : null;
 
     // 波纹强度随聚合度增强
     const baseRippleStrength = 0.15 + t * 0.25;
@@ -1442,10 +1458,10 @@ function animate() {
 
     currentScrollProgress += (targetScrollProgress - currentScrollProgress) * 0.06;
 
-    updateParticlePositions();
-
-    // 更新 GIF 帧动画
+    // 先更新 GIF 帧颜色，确保后续位置计算使用当帧颜色数据
     updateGifFrame(performance.now());
+
+    updateParticlePositions();
 
     if (controls) {
         controls.update();
