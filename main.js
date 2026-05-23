@@ -10,9 +10,11 @@ import { parseGIF, decompressFrames } from 'gifuct-js';
  */
 let scene, camera, renderer, composer;
 let particleSystem = null;
+window.particleSystem = null;
 let particleGeometry = null;
 let particleMaterial = null;
 let scatterSystem = null;
+window.scatterSystem = null;
 let scatterGeometry = null;
 let scatterMaterial = null;
 let scatterOriginalPositions = null;  // 飘散粒子聚合位置
@@ -588,11 +590,22 @@ function updateGifFrame(currentTime) {
     if (!updateGifFrame._hasLogged && gifFrameIndex === 1) {
         updateGifFrame._hasLogged = true;
         const scatterAttr = scatterGeometry ? scatterGeometry.attributes.vColor3 : null;
+        const mainGeoArray = particleGeometry.attributes.vColor3.array;
         console.log('[GIF帧切换诊断] frameIndex:', gifFrameIndex,
-            '主粒子颜色长度:', frameColors.length,
+            '主粒子几何体颜色长度:', mainGeoArray.length,
+            '主粒子帧颜色长度:', frameColors.length,
+            '是否完全匹配:', mainGeoArray.length === frameColors.length ? '✓' : '✗ 不匹配!',
             '飘散粒子颜色长度:', scatterAttr ? scatterAttr.array.length : 'N/A',
             'scatterFrameColors长度:', scatterFrameColors.length,
             '本次scatterFrameColor长度:', scatterFrameColors[gifFrameIndex] ? scatterFrameColors[gifFrameIndex].length : 'N/A');
+        // 检查场景中是否有重复的 Points 对象
+        const pointsInScene = scene.children.filter(c => c.isPoints);
+        console.log('[场景诊断] 场景中 Points 对象数量:', pointsInScene.length,
+            'particleSystem === scene中第1个?:', pointsInScene[0] === particleSystem,
+            'scatterSystem === scene中最后1个?:', pointsInScene[pointsInScene.length - 1] === scatterSystem);
+        if (pointsInScene.length > 2) {
+            console.warn('[场景诊断] ⚠ 发现多余的 Points 对象! 总数:', pointsInScene.length);
+        }
     }
 
     // 更新粒子颜色 buffer
@@ -923,6 +936,7 @@ function createParticleSystem() {
     });
 
     particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+    window.particleSystem = particleSystem;
     scene.add(particleSystem);
 }
 
@@ -1162,6 +1176,7 @@ function createScatterSystem(data, width, height) {
     });
 
     scatterSystem = new THREE.Points(scatterGeometry, scatterMaterial);
+    window.scatterSystem = scatterSystem;
     scene.add(scatterSystem);
 }
 
@@ -1182,6 +1197,16 @@ function updateParticlePositions() {
     // 波纹基础强度（随聚合度变化）
     const baseRippleStrength = 0.15 + t * 0.25;  // 聚合时波纹稍强
 
+    // 诊断：采样前3个粒子的颜色RGB值，验证帧间变化（每60帧输出一次）
+    if (!updateParticlePositions._frameCounter) updateParticlePositions._frameCounter = 0;
+    updateParticlePositions._frameCounter++;
+    if (updateParticlePositions._frameCounter % 60 === 0 && isGifPlaying) {
+        const geoColor = particleGeometry.attributes.vColor3.array;
+        console.log('[主粒子颜色采样] frameIndex:', gifFrameIndex,
+            'particleColors[0-5]:', particleColors[0], particleColors[1], particleColors[2],
+            '| geo.vColor3[0-5]:', geoColor[0], geoColor[1], geoColor[2]);
+    }
+
     for (let i = 0; i < originalPositions.length; i += 3) {
         const origX = originalPositions[i];
         const origY = originalPositions[i + 1];
@@ -1189,7 +1214,7 @@ function updateParticlePositions() {
 
         const randX = randomPositions[i];
         const randY = randomPositions[i + 1];
-        const randZ = randomPositions[i];
+        const randZ = randomPositions[i + 2];
 
         // 获取粒子颜色并计算亮度（用于凹凸区分）
         const r = particleColors[i];
@@ -1831,6 +1856,31 @@ function init() {
     animate();
     console.log('🎬 3D彩色粒子图像效果已初始化');
     console.log('📁 点击右侧UPLOAD按钮打开上传面板');
+    console.log('⌨ 快捷键: [1] 切换主粒子层 [2] 切换飘散粒子层 [3] 切换Bloom泛光');
 }
+
+/**
+ * 初始化键盘快捷键
+ * 用于隔离测试各渲染层
+ */
+window.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === '1') {
+        if (window.particleSystem) {
+            window.particleSystem.visible = !window.particleSystem.visible;
+            console.log('[切换] 主粒子层:', window.particleSystem.visible ? '显示' : '隐藏');
+        }
+    } else if (e.key === '2') {
+        if (window.scatterSystem) {
+            window.scatterSystem.visible = !window.scatterSystem.visible;
+            console.log('[切换] 飘散粒子层:', window.scatterSystem.visible ? '显示' : '隐藏');
+        }
+    } else if (e.key === '3') {
+        if (bloomPass) {
+            bloomPass.enabled = !bloomPass.enabled;
+            console.log('[切换] Bloom泛光:', bloomPass.enabled ? '启用' : '禁用');
+        }
+    }
+});
 
 init();
