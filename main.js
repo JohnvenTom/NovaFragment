@@ -30,6 +30,8 @@ let randomPositions = [];
 let randomZOffsets = [];
 let particleColors = [];
 let particleSizes = [];
+let particleAlphas = [];           // 当前逐粒子 alpha 值（用于 GIF 透明区域淡出）
+let targetAlphas = [];             // 每帧目标 alpha（0=透明区域应淡出, 1=可见）
 
 let targetScrollProgress = 0.3;
 let currentScrollProgress = 0.3;
@@ -38,6 +40,7 @@ let clock = new THREE.Clock();
 // ===== GIF 动画相关变量 =====
 let gifFrames = [];              // GIF 各帧的 ImageData 数组
 let gifFrameColors = [];         // 每帧对应的粒子颜色数据（Float32Array[]）
+let gifFrameAlphas = [];         // 每帧对应的粒子 alpha 目标值（0=透明, 1=可见）
 let gifFrameIndex = 0;           // 当前播放帧索引
 let gifLastFrameTime = 0;        // 上一帧切换时间戳
 let gifFrameDelay = 100;         // 帧间隔（毫秒），默认 100ms
@@ -45,7 +48,10 @@ let isGifPlaying = false;        // 是否正在播放 GIF
 let gifCanvas = null;            // 用于合成 GIF 帧的离屏 Canvas
 let gifCtx = null;               // 离屏 Canvas 上下文
 let scatterFrameColors = [];     // 飘散粒子每帧对应的颜色数据（Float32Array[]）
+let scatterFrameAlphas = [];     // 飘散粒子每帧对应的 alpha 目标值（Float32Array[]）
 let scatterValidPixels = null;   // 飘散粒子的采样像素映射（复用于帧颜色提取）
+let scatterAlphas = [];          // 飘散粒子当前 alpha 值
+let scatterTargetAlphas = [];    // 飘散粒子目标 alpha 值
 
 const SAMPLE_WIDTH = 400;
 const SAMPLE_HEIGHT = 400;
@@ -184,9 +190,13 @@ async function handleGifUpload(file) {
         isGifPlaying = false;
         gifFrames = [];
         gifFrameColors = [];
+        gifFrameAlphas = [];
         gifFrameIndex = 0;
         scatterFrameColors = [];
+        scatterFrameAlphas = [];
         scatterValidPixels = null;
+        scatterAlphas = [];
+        scatterTargetAlphas = [];
 
         // 计算采样尺寸（与静态图保持一致的宽高比逻辑）
         const gifWidth = gif.lsd.width;
@@ -213,6 +223,9 @@ async function handleGifUpload(file) {
         fullCanvas.height = gifHeight;
         const fullCtx = fullCanvas.getContext('2d');
 
+        // 用于 disposalType=3（恢复为前一帧）的画布快照
+        let prevFrameSnapshot = null;
+
         // 记录采样映射：哪些像素位置对应哪些粒子
         // 先用第一帧建立映射，后续帧复用同一映射
         let samplingMap = null;
@@ -221,6 +234,11 @@ async function handleGifUpload(file) {
             const frame = frames[f];
             const patchImageData = frame.patch;
             const dims = frame.dims;
+
+            // 绘制当前帧前保存快照（供 disposalType=3 使用）
+            if (f > 0) {
+                prevFrameSnapshot = fullCtx.getImageData(0, 0, gifWidth, gifHeight);
+            }
 
             // 将当前帧 patch 绘制到 patchCanvas
             const imgData = new ImageData(
@@ -234,8 +252,9 @@ async function handleGifUpload(file) {
             if (frame.disposalType === 2) {
                 // 恢复为背景色（清除上一帧区域）
                 fullCtx.clearRect(dims.left, dims.top, dims.width, dims.height);
-            } else if (frame.disposalType === 3) {
-                // 恢复为前一帧（暂不处理，简单方案直接覆盖）
+            } else if (frame.disposalType === 3 && prevFrameSnapshot) {
+                // 恢复为前一帧状态（使用保存的快照）
+                fullCtx.putImageData(prevFrameSnapshot, 0, 0);
             }
 
             // 将 patch 绘制到完整画布上
@@ -261,12 +280,14 @@ async function handleGifUpload(file) {
             );
 
             if (f === 0) {
-                // 第一帧：建立粒子系统，保存采样映射
+                // 第一帧：建立粒子系统，保存采样映射和 alpha 目标值
                 samplingMap = result.samplingMap;
                 gifFrameColors.push(result.colors);
+                gifFrameAlphas.push(result.alphas);
             } else {
-                // 后续帧：只保存颜色数据，复用映射
+                // 后续帧：只保存颜色数据和 alpha 目标值，复用映射
                 gifFrameColors.push(result.colors);
+                gifFrameAlphas.push(result.alphas);
             }
 
             // 同时提取飘散粒子该帧的颜色数据
@@ -280,6 +301,133 @@ async function handleGifUpload(file) {
                 scatterValidPixels = scatterResult.pixelMap;
             }
             scatterFrameColors.push(scatterResult.colors);
+            scatterFrameAlphas.push(scatterResult.alphas);
+        }
+
+        // ===== 帧差分分析：识别静态背景像素 vs 动态内容像素 =====
+        // 大多数 GIF 没有真正的 alpha 透明通道，"透明区域"靠帧间差异体现
+        // 对每个采样像素计算跨帧最大颜色变化量，低变化的视为静态背景并降低其 alpha
+        //
+        // ✅ 修复策略（v2）：
+        //   - 提高VARIANCE_THRESHOLD从0.12到0.25，减少对低变化区域的误判
+        //   - 新增hasTrueAlphaTransparent标记，保护已被alpha通道检测为透明的像素
+        //   - 只对非alpha透明且颜色变化小的像素应用帧差分淡出
+        //   - 这样可以避免带透明通道的GIF的透明区域被重复处理
+        if (samplingMap && gifFrameColors.length > 1) {
+            const VARIANCE_THRESHOLD = 0.25;   // ✅ 提高：从0.12→0.25，减少误判
+            const BACKGROUND_ALPHA = 0.0;       // 静态像素的目标 alpha（完全淡出）
+            const particleCount = samplingMap.length;
+
+            for (let p = 0; p < particleCount; p++) {
+                let maxDiff = 0;
+                let hasTrueAlphaTransparent = false;  // ✅ 新增：跟踪是否真正alpha透明
+
+                const r0 = gifFrameColors[0][p * 3];
+                const g0 = gifFrameColors[0][p * 3 + 1];
+                const b0 = gifFrameColors[0][p * 3 + 2];
+
+                // ✅ 新增：检查第一帧是否已经是alpha透明
+                if (gifFrameAlphas[0][p] === 0) {
+                    hasTrueAlphaTransparent = true;
+                }
+
+                // 与后续每帧比较，找最大颜色差异
+                for (let f = 1; f < gifFrameColors.length; f++) {
+                    const rf = gifFrameColors[f][p * 3];
+                    const gf = gifFrameColors[f][p * 3 + 1];
+                    const bf = gifFrameColors[f][p * 3 + 2];
+
+                    // 跳过 NaN 哨兵值（这些帧该位置透明，本身就是动态的）
+                    if (Number.isNaN(rf) || Number.isNaN(gf) || Number.isNaN(bf)) {
+                        maxDiff = Math.max(maxDiff, 999);
+                        break;
+                    }
+
+                    // ✅ 新增：如果任何帧已经alpha透明，记录下来
+                    if (gifFrameAlphas[f][p] === 0) {
+                        hasTrueAlphaTransparent = true;
+                    }
+
+                    const dr = Math.abs(rf - r0);
+                    const dg = Math.abs(gf - g0);
+                    const db = Math.abs(bf - b0);
+                    maxDiff = Math.max(maxDiff, dr, dg, db);
+                }
+
+                // ✅ 修复：只有非alpha透明的像素才应用帧差分检测
+                // 如果像素已经被alpha通道标记为透明，不再被帧差分覆盖（避免双重淡出）
+                if (!hasTrueAlphaTransparent && maxDiff < VARIANCE_THRESHOLD) {
+                    for (let f = 0; f < gifFrameAlphas.length; f++) {
+                        if (gifFrameAlphas[f][p] !== 0) {
+                            gifFrameAlphas[f][p] = BACKGROUND_ALPHA;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 同样处理飘散粒子的帧差分（按像素映射分组）
+        // ✅ 修复：与主粒子保持一致的阈值和透明保护策略
+        if (scatterValidPixels && scatterFrameAlphas.length > 1) {
+            const SCATTER_VARIANCE_THRESHOLD = 0.25;  // ✅ 同步提高：从0.12→0.25
+            const scatterPixelCount = scatterValidPixels.length;
+
+            // 构建每个像素对应的 scatter 粒子起始索引
+            const pixelStartIndex = [];
+            let acc = 0;
+            for (let px = 0; px < scatterPixelCount; px++) {
+                pixelStartIndex.push(acc);
+                const { forwardLayers, backwardLayers } = scatterValidPixels[px];
+                acc += forwardLayers + backwardLayers;
+            }
+            const totalScatterParticles = acc;
+
+            for (let px = 0; px < scatterPixelCount; px++) {
+                let maxDiff = 0;
+                let hasTrueAlphaTransparent = false;  // ✅ 新增：跟踪alpha透明状态
+                const startIdx = pixelStartIndex[px];
+                const r0 = scatterFrameColors[0][startIdx * 3];
+                const g0 = scatterFrameColors[0][startIdx * 3 + 1];
+                const b0 = scatterFrameColors[0][startIdx * 3 + 2];
+
+                // ✅ 新增：检查第一帧是否已alpha透明
+                if (scatterFrameAlphas[0][startIdx] === 0) {
+                    hasTrueAlphaTransparent = true;
+                }
+
+                for (let f = 1; f < scatterFrameColors.length; f++) {
+                    const rf = scatterFrameColors[f][startIdx * 3];
+                    const gf = scatterFrameColors[f][startIdx * 3 + 1];
+                    const bf = scatterFrameColors[f][startIdx * 3 + 2];
+
+                    // ✅ 新增：检查每帧的alpha透明状态
+                    if (scatterFrameAlphas[f][startIdx] === 0) {
+                        hasTrueAlphaTransparent = true;
+                    }
+
+                    const dr = Math.abs(rf - r0);
+                    const dg = Math.abs(gf - g0);
+                    const db = Math.abs(bf - b0);
+                    maxDiff = Math.max(maxDiff, dr, dg, db);
+                }
+
+                // ✅ 修复：只对非alpha透明的像素应用帧差分淡出
+                if (!hasTrueAlphaTransparent && maxDiff < SCATTER_VARIANCE_THRESHOLD) {
+                    const { forwardLayers, backwardLayers } = scatterValidPixels[px];
+                    const layerCount = forwardLayers + backwardLayers;
+                    for (let f = 0; f < scatterFrameAlphas.length; f++) {
+                        for (let l = 0; l < layerCount; l++) {
+                            const idx = startIdx + l;
+                            if (idx < scatterFrameAlphas[f].length) {
+                                // 只降低原本非零的 alpha，保留已有透明标记
+                                if (scatterFrameAlphas[f][idx] !== 0) {
+                                    scatterFrameAlphas[f][idx] = 0.0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // 使用第一帧数据初始化粒子系统
@@ -329,17 +477,19 @@ async function handleGifUpload(file) {
 /**
  * 从 ImageData 提取粒子颜色数据
  * 支持两种模式：首次调用建立采样映射，后续调用复用映射
+ * 同时返回每帧的 alpha 目标值，用于 GIF 透明区域粒子的平滑淡出
  * @param {ImageData} imageData - 帧的像素数据
  * @param {number} width - 采样宽度
  * @param {number} height - 采样高度
  * @param {Array|null} existingMap - 已有的采样映射（null 时新建映射）
- * @returns {{ colors: Float32Array, samplingMap: Array }} 颜色数组和采样映射
+ * @returns {{ colors: Float32Array, alphas: Float32Array, samplingMap: Array }} 颜色数组、alpha目标数组和采样映射
  */
 function extractColorsFromImageData(imageData, width, height, existingMap) {
     const data = imageData.data;
     const scaleX = 0.065;
     const scaleY = 0.065;
     const colors = [];
+    const alphas = [];
     const samplingMap = existingMap || [];
 
     // 如果没有已有映射，需要新建（第一帧）
@@ -363,10 +513,11 @@ function extractColorsFromImageData(imageData, width, height, existingMap) {
                 // 记录该粒子的像素坐标和随机种子
                 samplingMap.push({ x, y, seed: Math.random() });
                 colors.push(r, g, b);
+                alphas.push(1);   // 第一帧所有粒子均可见
             }
         }
     } else {
-        // 复用已有映射，按相同顺序提取颜色
+        // 复用已有映射，按相同顺序提取颜色和 alpha 目标值
         for (let m = 0; m < existingMap.length; m++) {
             const { x, y, seed } = existingMap[m];
             const i = (y * width + x) * 4;
@@ -376,9 +527,19 @@ function extractColorsFromImageData(imageData, width, height, existingMap) {
             let b = data[i + 2] / 255;
             const a = data[i + 3] / 255;
 
-            // 透明像素保留上一帧颜色（通过使用 0,0,0，后续在播放时跳过）
-            if (a < 0.1) {
-                r = 0; g = 0; b = 0;
+            // 透明/半透明像素处理（改进版）
+            // ✅ 修复策略：
+            //   - a < 0.15: 完全透明区域，严格标记为透明（颜色设为NaN哨兵，alpha=0）
+            //   - 0.15 ≤ a < 0.4: 半透明区域，保留颜色但降低alpha目标值（渐变淡出效果）
+            //   - a ≥ 0.4: 可见区域，保持完全不透明
+            // 这样可以更好地处理GIF的抗锯齿边缘和半透明效果
+            if (a < 0.15) {
+                r = NaN; g = NaN; b = NaN;
+                alphas.push(0);       // 完全淡出
+            } else if (a < 0.4) {
+                alphas.push(a * 0.8); // 渐变淡出：半透明区域部分可见
+            } else {
+                alphas.push(1);       // 完全保持可见
             }
 
             colors.push(r, g, b);
@@ -387,6 +548,7 @@ function extractColorsFromImageData(imageData, width, height, existingMap) {
 
     return {
         colors: new Float32Array(colors),
+        alphas: new Float32Array(alphas),
         samplingMap
     };
 }
@@ -409,6 +571,8 @@ function initializeParticlesFromGif(firstFrame, clampedWidth, clampedHeight, sam
     randomZOffsets = [];
     particleColors = [];
     particleSizes = [];
+    particleAlphas = [];
+    targetAlphas = [];
 
     for (let m = 0; m < samplingMap.length; m++) {
         const { x, y, seed } = samplingMap[m];
@@ -416,12 +580,10 @@ function initializeParticlesFromGif(firstFrame, clampedWidth, clampedHeight, sam
         const r = data[i] / 255;
         const g = data[i + 1] / 255;
         const b = data[i + 2] / 255;
-        const a = data[i + 3] / 255;
 
-        if (a < 0.1) continue;
-
+        // 注意：samplingMap 已由 extractColorsFromImageData 首帧模式过滤过透明/纯黑像素
+        // 此处不再二次过滤，确保 particleColors 长度与 gifFrameColors 完全一致
         const brightness = (r + g + b) / 3;
-        if (brightness < 0.01) continue;
 
         const baseX = (x - clampedWidth / 2) * scaleX;
         const baseY = -(y - clampedHeight / 2) * scaleY;
@@ -457,6 +619,10 @@ function initializeParticlesFromGif(firstFrame, clampedWidth, clampedHeight, sam
 
         particleColors.push(r, g, b);
 
+        // 第一帧所有粒子均可见，alpha 初始化为 1
+        particleAlphas.push(1);
+        targetAlphas.push(1);
+
         const brightnessFactor = 0.5 + brightness * 0.9;
         const randomScale = 0.6 + seed * 0.8;
         const size = PARTICLE_SIZE_BASE * brightnessFactor * randomScale;
@@ -470,16 +636,18 @@ function initializeParticlesFromGif(firstFrame, clampedWidth, clampedHeight, sam
 /**
  * 从 ImageData 提取飘散粒子颜色数据（用于 GIF 帧动画）
  * 采样逻辑与 createScatterSystem 完全一致：隔3像素采样 + Z轴深度柱
+ * 同时返回每帧的 alpha 目标值，用于透明区域粒子的平滑淡出
  * @param {ImageData} imageData - 帧的像素数据
  * @param {number} width - 采样宽度
  * @param {number} height - 采样高度
  * @param {Array|null} existingPixelMap - 已有的像素映射（null 时新建映射）
- * @returns {{ colors: Float32Array, pixelMap: Array }} 颜色数组和像素映射
+ * @returns {{ colors: Float32Array, alphas: Float32Array, pixelMap: Array }} 颜色数组、alpha目标数组和像素映射
  */
 function extractScatterColorsFromImageData(imageData, width, height, existingPixelMap) {
     const data = imageData.data;
     const SAMPLE_STEP = 3;
     const colors = [];
+    const alphas = [];
     const pixelMap = existingPixelMap || [];
 
     if (!existingPixelMap) {
@@ -503,6 +671,7 @@ function extractScatterColorsFromImageData(imageData, width, height, existingPix
                     : Math.floor(1 + (1 - brightness) * 1);
 
                 pixelMap.push({ x, y, forwardLayers, backwardLayers });
+                const totalLayers = forwardLayers + backwardLayers;
 
                 // 前方深度柱颜色
                 for (let layer = 1; layer <= forwardLayers; layer++) {
@@ -523,10 +692,15 @@ function extractScatterColorsFromImageData(imageData, width, height, existingPix
                         Math.min(1, b * fadeFactor * 1.05)
                     );
                 }
+
+                // 第一帧所有粒子均可见
+                for (let l = 0; l < totalLayers; l++) {
+                    alphas.push(1);
+                }
             }
         }
     } else {
-        // 后续帧：复用像素映射，只提取颜色
+        // 后续帧：复用像素映射，只提取颜色和 alpha 目标值
         for (let m = 0; m < existingPixelMap.length; m++) {
             const { x, y, forwardLayers, backwardLayers } = existingPixelMap[m];
             const pi = (y * width + x) * 4;
@@ -535,9 +709,22 @@ function extractScatterColorsFromImageData(imageData, width, height, existingPix
             const b = data[pi + 2] / 255;
             const a = data[pi + 3] / 255;
 
-            const cr = a < 0.1 ? 0 : r;
-            const cg = a < 0.1 ? 0 : g;
-            const cb = a < 0.1 ? 0 : b;
+            // ✅ 修复：与主粒子Alpha检测保持一致的渐变阈值策略
+            //   - a < 0.15: 完全透明，颜色归零，alpha=0
+            //   - 0.15 ≤ a < 0.4: 半透明，保留颜色，alpha渐变淡出
+            //   - a ≥ 0.4: 完全可见
+            let cr, cg, cb, targetAlpha;
+            if (a < 0.15) {
+                cr = 0; cg = 0; cb = 0;
+                targetAlpha = 0;           // 完全淡出
+            } else if (a < 0.4) {
+                cr = r; cg = g; cb = b;
+                targetAlpha = a * 0.8;    // 渐变淡出
+            } else {
+                cr = r; cg = g; cb = b;
+                targetAlpha = 1;          // 完全可见
+            }
+            const totalLayers = forwardLayers + backwardLayers;
 
             // 前方深度柱颜色
             for (let layer = 1; layer <= forwardLayers; layer++) {
@@ -558,24 +745,65 @@ function extractScatterColorsFromImageData(imageData, width, height, existingPix
                     Math.min(1, cb * fadeFactor * 1.05)
                 );
             }
+
+            // 该像素的所有深度柱层共享同一 alpha 目标值
+            for (let l = 0; l < totalLayers; l++) {
+                alphas.push(targetAlpha);
+            }
         }
     }
 
     return {
         colors: new Float32Array(colors),
+        alphas: new Float32Array(alphas),
         pixelMap
     };
 }
 
 /**
  * 更新 GIF 帧动画
- * 在主动画循环中调用，按帧间隔切换粒子颜色
+ * 在主动画循环中调用，按帧间隔切换粒子颜色，并对透明区域粒子做平滑 alpha 淡出/淡入
  * @param {number} currentTime - 当前时间戳（performance.now()）
  */
 function updateGifFrame(currentTime) {
     if (!isGifPlaying || gifFrameColors.length <= 1) return;
     if (!particleGeometry) return;
 
+    // ===== Alpha 平滑插值：每帧都执行，确保淡出/淡入动画流畅 =====
+    // 注意：alpha lerp 必须在帧切换守卫之前，否则非切换帧时 alpha 不更新
+    const particleCount = originalPositions.length / 3;
+    if (particleCount > 0 && particleAlphas.length === particleCount && targetAlphas.length === particleCount) {
+        const alphaAttr = particleGeometry.attributes.vAlpha;
+        if (alphaAttr) {
+            const FADE_SPEED = 0.12;
+            const ALPHA_EPSILON = 0.005;
+
+            for (let p = 0; p < particleCount; p++) {
+                particleAlphas[p] += (targetAlphas[p] - particleAlphas[p]) * FADE_SPEED;
+                if (particleAlphas[p] < ALPHA_EPSILON) particleAlphas[p] = 0;
+                alphaAttr.array[p] = particleAlphas[p];
+            }
+            alphaAttr.needsUpdate = true;
+        }
+    }
+
+    // 飘散粒子 alpha 同样每帧都 lerp
+    if (scatterAlphas.length > 0 && scatterTargetAlphas.length === scatterAlphas.length) {
+        const scatterAlphaAttr = scatterGeometry ? scatterGeometry.attributes.vAlpha : null;
+        if (scatterAlphaAttr && scatterAlphaAttr.array.length === scatterAlphas.length) {
+            const SCATTER_FADE_SPEED = 0.12;
+            const SCATTER_ALPHA_EPSILON = 0.005;
+
+            for (let s = 0; s < scatterAlphas.length; s++) {
+                scatterAlphas[s] += (scatterTargetAlphas[s] - scatterAlphas[s]) * SCATTER_FADE_SPEED;
+                if (scatterAlphas[s] < SCATTER_ALPHA_EPSILON) scatterAlphas[s] = 0;
+                scatterAlphaAttr.array[s] = scatterAlphas[s];
+            }
+            scatterAlphaAttr.needsUpdate = true;
+        }
+    }
+
+    // 帧切换逻辑：按帧间隔切换颜色和 alpha 目标值
     const elapsed = currentTime - gifLastFrameTime;
     if (elapsed < gifFrameDelay) return;
 
@@ -586,29 +814,10 @@ function updateGifFrame(currentTime) {
     const frameColors = gifFrameColors[gifFrameIndex];
     if (!frameColors || frameColors.length === 0) return;
 
-    // 诊断：记录主粒子与飘散粒子的颜色数组长度对比（仅首次帧切换时输出一次）
-    if (!updateGifFrame._hasLogged && gifFrameIndex === 1) {
-        updateGifFrame._hasLogged = true;
-        const scatterAttr = scatterGeometry ? scatterGeometry.attributes.vColor3 : null;
-        const mainGeoArray = particleGeometry.attributes.vColor3.array;
-        console.log('[GIF帧切换诊断] frameIndex:', gifFrameIndex,
-            '主粒子几何体颜色长度:', mainGeoArray.length,
-            '主粒子帧颜色长度:', frameColors.length,
-            '是否完全匹配:', mainGeoArray.length === frameColors.length ? '✓' : '✗ 不匹配!',
-            '飘散粒子颜色长度:', scatterAttr ? scatterAttr.array.length : 'N/A',
-            'scatterFrameColors长度:', scatterFrameColors.length,
-            '本次scatterFrameColor长度:', scatterFrameColors[gifFrameIndex] ? scatterFrameColors[gifFrameIndex].length : 'N/A');
-        // 检查场景中是否有重复的 Points 对象
-        const pointsInScene = scene.children.filter(c => c.isPoints);
-        console.log('[场景诊断] 场景中 Points 对象数量:', pointsInScene.length,
-            'particleSystem === scene中第1个?:', pointsInScene[0] === particleSystem,
-            'scatterSystem === scene中最后1个?:', pointsInScene[pointsInScene.length - 1] === scatterSystem);
-        if (pointsInScene.length > 2) {
-            console.warn('[场景诊断] ⚠ 发现多余的 Points 对象! 总数:', pointsInScene.length);
-        }
-    }
+    // 获取当前帧的 alpha 目标值并更新 targetAlphas
+    const frameAlphas = gifFrameAlphas[gifFrameIndex];
 
-    // 更新粒子颜色 buffer
+    // 更新粒子颜色 buffer（跳过 NaN 哨兵值以保留透明像素上一帧的可见颜色）
     const colorAttr = particleGeometry.attributes.vColor3;
     if (!colorAttr) return;
 
@@ -616,14 +825,25 @@ function updateGifFrame(currentTime) {
     const len = Math.min(colorArray.length, frameColors.length);
 
     for (let i = 0; i < len; i++) {
-        colorArray[i] = frameColors[i];
+        if (!Number.isNaN(frameColors[i])) {
+            colorArray[i] = frameColors[i];
+        }
     }
 
     colorAttr.needsUpdate = true;
 
     // 同步更新全局 particleColors（供波纹等效果使用）
     for (let i = 0; i < len; i++) {
-        particleColors[i] = frameColors[i];
+        if (!Number.isNaN(frameColors[i])) {
+            particleColors[i] = frameColors[i];
+        }
+    }
+
+    // 更新主粒子的 alpha 目标值（实际 lerp 在函数开头已处理）
+    if (frameAlphas && frameAlphas.length === particleCount) {
+        for (let p = 0; p < particleCount; p++) {
+            targetAlphas[p] = frameAlphas[p];
+        }
     }
 
     // 同步更新飘散粒子颜色
@@ -644,6 +864,16 @@ function updateGifFrame(currentTime) {
         } else {
             console.warn('[scatter] scatterGeometry.attributes.vColor3 不存在');
         }
+
+        // 更新飘散粒子的 alpha 目标值（实际 lerp 在函数开头已处理）
+        if (scatterFrameAlphas.length > 0) {
+            const scatterFrameAlpha = scatterFrameAlphas[gifFrameIndex];
+            if (scatterFrameAlpha && scatterFrameAlpha.length === scatterTargetAlphas.length) {
+                for (let s = 0; s < scatterTargetAlphas.length; s++) {
+                    scatterTargetAlphas[s] = scatterFrameAlpha[s];
+                }
+            }
+        }
     } else if (!scatterGeometry) {
         console.warn('[scatter] scatterGeometry 为 null，跳过颜色更新');
     }
@@ -660,9 +890,13 @@ function processImage(img) {
     isGifPlaying = false;
     gifFrames = [];
     gifFrameColors = [];
+    gifFrameAlphas = [];
     gifFrameIndex = 0;
     scatterFrameColors = [];
+    scatterFrameAlphas = [];
     scatterValidPixels = null;
+    scatterAlphas = [];
+    scatterTargetAlphas = [];
 
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -687,6 +921,8 @@ function processImage(img) {
     randomZOffsets = [];
     particleColors = [];
     particleSizes = [];
+    particleAlphas = [];
+    targetAlphas = [];
 
     // 计算缩放因子使图像居中且大小合适
     const scaleX = 0.065;  // X轴单位像素对应的3D空间距离
@@ -748,6 +984,8 @@ function processImage(img) {
             randomZOffsets.push(randomZ);
 
             particleColors.push(r, g, b);
+            particleAlphas.push(1);    // 静态图所有粒子始终可见
+            targetAlphas.push(1);
 
             // ===== 粒子大小：更大的变化范围，增强层次感 =====
             const brightnessFactor = 0.5 + brightness * 0.9;  // 0.5-1.4的范围
@@ -818,6 +1056,7 @@ function createParticleSystem() {
     const positions = new Float32Array(originalPositions.length);
     const colors = new Float32Array(particleColors);
     const sizes = new Float32Array(particleSizes);
+    const alphas = new Float32Array(particleAlphas);
 
     for (let i = 0; i < originalPositions.length; i += 3) {
         const t = currentScrollProgress;
@@ -829,6 +1068,7 @@ function createParticleSystem() {
     particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     particleGeometry.setAttribute('vColor3', new THREE.BufferAttribute(colors, 3));
     particleGeometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+    particleGeometry.setAttribute('vAlpha', new THREE.BufferAttribute(alphas, 1));
 
     particleMaterial = new THREE.ShaderMaterial({
         uniforms: {
@@ -844,15 +1084,18 @@ function createParticleSystem() {
         vertexShader: `
             attribute float size;
             attribute vec3 vColor3;
+            attribute float vAlpha;
             varying vec3 vColor;
             varying float vDistance;
             varying float vDepth;
+            varying float vAlphaVarying;
             uniform float time;
             uniform float uPulseAmp;
             uniform float uDepthFactor;
 
             void main() {
                 vColor = vColor3;
+                vAlphaVarying = vAlpha;
                 vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
                 vDistance = -mvPosition.z;
                 vDepth = position.z;
@@ -878,6 +1121,7 @@ function createParticleSystem() {
             varying vec3 vColor;
             varying float vDistance;
             varying float vDepth;
+            varying float vAlphaVarying;
             uniform float time;
             uniform float uGlowDecay;
             uniform float uColorGlowMult;
@@ -918,6 +1162,9 @@ function createParticleSystem() {
                 float depthFade = smoothstep(50.0, 8.0, vDistance);
                 float zFade = smoothstep(-8.0, 6.0, vDepth) * 0.06 + 0.94;
                 alpha *= depthFade * zFade;
+
+                // GIF 透明区域粒子 alpha 淡出（逐粒子控制）
+                alpha *= vAlphaVarying;
 
                 // 流水动态辉光
                 float flowGlow = sin(time * 1.5 + vDepth * 2.5) * uFlowGlowAmp + (1.0 - uFlowGlowAmp * 0.33);
@@ -1053,6 +1300,11 @@ function createScatterSystem(data, width, height) {
     const finalColors = new Float32Array(allColors);
     const finalSizes = new Float32Array(allSizes);
 
+    // 初始化飘散粒子 alpha 数组（所有粒子初始可见）
+    scatterAlphas = new Float32Array(totalCount).fill(1);
+    scatterTargetAlphas = new Float32Array(totalCount).fill(1);
+    const finalAlphas = new Float32Array(scatterAlphas);
+
     // 存储聚合位置（深度柱位置）
     scatterOriginalPositions = new Float32Array(finalPositions);
 
@@ -1082,6 +1334,7 @@ function createScatterSystem(data, width, height) {
     scatterGeometry.setAttribute('position', new THREE.BufferAttribute(finalPositions, 3));
     scatterGeometry.setAttribute('vColor3', new THREE.BufferAttribute(finalColors, 3));
     scatterGeometry.setAttribute('size', new THREE.BufferAttribute(finalSizes, 1));
+    scatterGeometry.setAttribute('vAlpha', new THREE.BufferAttribute(finalAlphas, 1));
 
     scatterMaterial = new THREE.ShaderMaterial({
         uniforms: {
@@ -1096,15 +1349,18 @@ function createScatterSystem(data, width, height) {
         vertexShader: `
             attribute float size;
             attribute vec3 vColor3;
+            attribute float vAlpha;
             varying vec3 vColor;
             varying float vDistance;
             varying float vDepth;
+            varying float vAlphaVarying;
             uniform float time;
             uniform float uPulseAmp;
             uniform float uDepthFactor;
 
             void main() {
                 vColor = vColor3;
+                vAlphaVarying = vAlpha;
                 vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
                 vDistance = -mvPosition.z;
                 vDepth = position.z;
@@ -1129,6 +1385,7 @@ function createScatterSystem(data, width, height) {
             varying vec3 vColor;
             varying float vDistance;
             varying float vDepth;
+            varying float vAlphaVarying;
             uniform float time;
             uniform float uGlowDecay;
             uniform float uColorGlowMult;
@@ -1162,6 +1419,9 @@ function createScatterSystem(data, width, height) {
                 float depthFade = smoothstep(50.0, 6.0, vDistance);
                 float zFade = smoothstep(-5.0, 5.0, vDepth) * 0.1 + 0.9;
                 alpha *= depthFade * zFade;
+
+                // GIF 透明区域粒子 alpha 淡出（逐粒子控制）
+                alpha *= vAlphaVarying;
 
                 // 流水动态辉光
                 float flowGlow = sin(time * 1.5 + vDepth * 2.5) * uFlowGlowAmp + (1.0 - uFlowGlowAmp * 0.33);
